@@ -1,0 +1,40 @@
+[
+  {
+    "apiVersion": "v1",
+    "kind": "Event",
+    "metadata": {
+      "name": "web-app-123.17a1b2c3",
+      "namespace": "prod"
+    },
+    "involvedObject": {
+      "kind": "Pod",
+      "name": "web-app-123",
+      "namespace": "prod"
+    },
+    "reason": "CrashLoopBackOff",
+    "type": "Warning",
+    "message": "Back-off 5m0s restarting failed container=web-app pod/web-app-123_prod(abc-123)",
+    "firstTimestamp": "2025-02-15T10:00:00Z",
+    "lastTimestamp": "2025-02-15T10:30:00Z",
+    "count": 12
+  },
+  {
+    "apiVersion": "v1",
+    "kind": "Event",
+    "metadata": {
+      "name": "web-app-123.17a1b2c4",
+      "namespace": "prod"
+    },
+    "involvedObject": {
+      "kind": "Pod",
+      "name": "web-app-123",
+      "namespace": "prod"
+    },
+    "reason": "BackOff",
+    "type": "Warning",
+    "message": "Back-off restarting failed container",
+    "firstTimestamp": "2025-02-15T10:05:00Z",
+    "lastTimestamp": "2025-02-15T10:35:00Z",
+    "count": 8
+  }
+]

@@ -1,0 +1,27 @@
+# ── Core LangChain stack ──────────────────────────────────
+langchain>=0.3.0,<1.0
+langchain-core>=0.3.0,<1.0
+langchain-community>=0.3.0,<1.0
+langchain-milvus>=0.1.0
+langchain-ollama>=0.2.0
+langchain-huggingface>=0.1.0
+langchain-text-splitters>=0.3.0
+
+# ── Vector DB & embeddings ────────────────────────────────
+pymilvus>=2.4.0
+sentence-transformers>=3.0.0
+
+# ── Config & utilities ────────────────────────────────────
+pydantic>=2.0
+pydantic-settings>=2.0
+pyyaml>=6.0
+python-dotenv>=1.0
+rich>=13.0
+
+# ── API server ────────────────────────────────────────────
+fastapi>=0.100.0
+uvicorn>=0.24.0
+jinja2>=3.1.0
+
+# ── Dev / testing ─────────────────────────────────────────
+pytest>=8.0

@@ -1,0 +1,40 @@
+[
+  {
+    "apiVersion": "v1",
+    "kind": "Event",
+    "metadata": {
+      "name": "data-processor-456.18b3c4d5",
+      "namespace": "prod"
+    },
+    "involvedObject": {
+      "kind": "Pod",
+      "name": "data-processor-456",
+      "namespace": "prod"
+    },
+    "reason": "OOMKilled",
+    "type": "Warning",
+    "message": "Container data-processor in pod data-processor-456 was OOMKilled. Memory limit: 512Mi, usage at kill: 511Mi",
+    "firstTimestamp": "2025-02-14T14:22:00Z",
+    "lastTimestamp": "2025-02-14T14:22:00Z",
+    "count": 1
+  },
+  {
+    "apiVersion": "v1",
+    "kind": "Event",
+    "metadata": {
+      "name": "data-processor-457.18b3c4d6",
+      "namespace": "prod"
+    },
+    "involvedObject": {
+      "kind": "Pod",
+      "name": "data-processor-457",
+      "namespace": "prod"
+    },
+    "reason": "OOMKilled",
+    "type": "Warning",
+    "message": "Container data-processor in pod data-processor-457 was OOMKilled. Memory limit: 512Mi, usage at kill: 510Mi",
+    "firstTimestamp": "2025-02-14T15:00:00Z",
+    "lastTimestamp": "2025-02-14T15:00:00Z",
+    "count": 1
+  }
+]

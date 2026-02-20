@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>K8s Failure Intelligence Copilot</title>
+
+  <!-- Styles -->
+  <link rel="stylesheet" href="{{ url_for('static', path='styles.css') }}" />
+  <!-- Highlight.js theme -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+</head>
+<body>
+  <!-- Fullscreen 3D background -->
+  <canvas id="bg-canvas" aria-hidden="true"></canvas>
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       SPLASH / INTRO SCREEN — cinematic boot sequence
+       ═══════════════════════════════════════════════════════════════════ -->
+  <div id="splash" aria-label="Loading">
+    <!-- Scan-lines overlay -->
+    <div class="splash-scanlines" aria-hidden="true"></div>
+
+    <!-- Central content -->
+    <div class="splash-content">
+      <!-- Animated hex ring -->
+      <div class="splash-ring" aria-hidden="true">
+        <svg viewBox="0 0 120 120" class="splash-ring-svg">
+          <polygon class="ring-hex" points="60,5 110,30 110,90 60,115 10,90 10,30" />
+          <polygon class="ring-hex ring-hex--inner" points="60,20 95,38 95,82 60,100 25,82 25,38" />
+        </svg>
+        <div class="splash-icon">⎈</div>
+      </div>
+
+      <!-- Glitch text -->
+      <h1 class="splash-title" data-text="K8s INTELLIGENCE">K8s INTELLIGENCE</h1>
+      <div class="splash-subtitle">FAILURE DETECTION COPILOT</div>
+
+      <!-- Boot log -->
+      <div class="splash-log" id="splash-log">
+        <div class="splash-log-line" data-delay="0">[BOOT] Initializing neural diagnostic engine…</div>
+        <div class="splash-log-line" data-delay="300">[CONN] Connecting to vector store…</div>
+        <div class="splash-log-line" data-delay="600">[LOAD] Loading RAG pipeline…</div>
+        <div class="splash-log-line" data-delay="900">[SYNC] Synchronizing cluster knowledge base…</div>
+        <div class="splash-log-line" data-delay="1200">[READY] All systems operational ✓</div>
+      </div>
+
+      <!-- Progress bar -->
+      <div class="splash-progress">
+        <div class="splash-progress-bar" id="splash-progress-bar"></div>
+      </div>
+    </div>
+
+    <!-- Corner decorations -->
+    <div class="splash-corner splash-corner--tl" aria-hidden="true"></div>
+    <div class="splash-corner splash-corner--tr" aria-hidden="true"></div>
+    <div class="splash-corner splash-corner--bl" aria-hidden="true"></div>
+    <div class="splash-corner splash-corner--br" aria-hidden="true"></div>
+  </div>
+
+  <!-- Ambient glow blobs -->
+  <div class="ambient-glow ambient-glow--1" aria-hidden="true"></div>
+  <div class="ambient-glow ambient-glow--2" aria-hidden="true"></div>
+  <div class="ambient-glow ambient-glow--3" aria-hidden="true"></div>
+
+  <!-- Cursor glow follower -->
+  <div id="cursor-glow" class="cursor-glow" aria-hidden="true"></div>
+
+  <!-- Toast notifications -->
+  <div id="toast-container" aria-live="polite"></div>
+
+  <!-- Main App Shell -->
+  <div id="app" class="app-hidden">
+
+    <!-- Header -->
+    <header class="header" role="banner">
+      <div class="brand">
+        <div class="brand-icon" aria-hidden="true">
+          <span class="brand-icon-text">K8s</span>
+          <div class="brand-icon-pulse"></div>
+        </div>
+        <div>
+          <div class="brand-text">Failure Intelligence Copilot</div>
+          <div class="brand-sub">RAG-powered Kubernetes diagnosis</div>
+        </div>
+      </div>
+      <div class="header-right">
+        <div class="status-dot" id="status-dot" title="Backend status"></div>
+        <span class="status-text" id="status-text">Connecting…</span>
+        <button class="theme-btn" id="theme-btn" title="Switch theme" aria-label="Switch color theme">🌙</button>
+      </div>
+    </header>
+
+    <!-- Chat Panel -->
+    <div class="chat-container" role="main">
+
+      <!-- Messages -->
+      <div id="chat-messages" role="log" aria-label="Chat messages">
+
+        <!-- Welcome Screen -->
+        <div class="welcome" id="welcome-screen">
+          <div class="welcome-orb" aria-hidden="true">
+            <div class="welcome-orb-ring welcome-orb-ring--1"></div>
+            <div class="welcome-orb-ring welcome-orb-ring--2"></div>
+            <div class="welcome-orb-ring welcome-orb-ring--3"></div>
+            <div class="welcome-icon">⎈</div>
+          </div>
+          <h2 class="welcome-title">K8s Intelligence Copilot</h2>
+          <p class="welcome-desc">Ask about Kubernetes failures — CrashLoopBackOff, OOMKilled, ImagePullBackOff, scheduling issues, and more. I'll diagnose with evidence from your cluster data.</p>
+          <div class="welcome-chips">
+            <button class="welcome-chip" data-query="Why is my pod in CrashLoopBackOff?">CrashLoopBackOff</button>
+            <button class="welcome-chip" data-query="My container was OOMKilled, what should I do?">OOMKilled</button>
+            <button class="welcome-chip" data-query="How do I fix ImagePullBackOff in Kubernetes?">ImagePullBackOff</button>
+            <button class="welcome-chip" data-query="My Kubernetes pod is stuck in Pending state">Scheduling</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Input Area -->
+      <div class="input-area">
+        <div class="input-row">
+          <div class="input-wrapper">
+            <textarea
+              id="question"
+              rows="1"
+              placeholder="Ask about a K8s failure…"
+              aria-label="Question input"
+            ></textarea>
+            <div class="input-glow" aria-hidden="true"></div>
+          </div>
+          <button class="send-btn" id="send-btn" aria-label="Send message" title="Send (Enter)">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+          </button>
+        </div>
+        <div class="controls-row">
+          <div class="control-field">
+            <span class="control-label">Session</span>
+            <input class="control-input" id="session-id" type="text" value="web" aria-label="Session ID" />
+          </div>
+          <div class="control-field">
+            <span class="control-label">Model</span>
+            <select class="control-select" id="model-override" aria-label="Model override">
+              <option value="">Auto</option>
+              <option value="{{ simple_model }}">{{ simple_model }}</option>
+              <option value="{{ complex_model }}">{{ complex_model }}</option>
+            </select>
+          </div>
+          <button class="clear-btn" id="clear-btn" title="Clear chat memory for this session">Clear Memory</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- CDN Libraries -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/yaml.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.1/marked.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.9/purify.min.js"></script>
+
+  <!-- App -->
+  <script src="{{ url_for('static', path='app.js') }}"></script>
+</body>
+</html>

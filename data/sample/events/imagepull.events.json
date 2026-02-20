@@ -1,0 +1,59 @@
+[
+  {
+    "apiVersion": "v1",
+    "kind": "Event",
+    "metadata": {
+      "name": "frontend-789.19c4d5e6",
+      "namespace": "staging"
+    },
+    "involvedObject": {
+      "kind": "Pod",
+      "name": "frontend-789",
+      "namespace": "staging"
+    },
+    "reason": "Failed",
+    "type": "Warning",
+    "message": "Failed to pull image \"registry.internal/frontend:v2.1.0\": rpc error: code = Unknown desc = Error response from daemon: manifest for registry.internal/frontend:v2.1.0 not found",
+    "firstTimestamp": "2025-02-13T09:10:00Z",
+    "lastTimestamp": "2025-02-13T09:15:00Z",
+    "count": 3
+  },
+  {
+    "apiVersion": "v1",
+    "kind": "Event",
+    "metadata": {
+      "name": "frontend-789.19c4d5e7",
+      "namespace": "staging"
+    },
+    "involvedObject": {
+      "kind": "Pod",
+      "name": "frontend-789",
+      "namespace": "staging"
+    },
+    "reason": "ErrImagePull",
+    "type": "Warning",
+    "message": "Error: ErrImagePull",
+    "firstTimestamp": "2025-02-13T09:10:05Z",
+    "lastTimestamp": "2025-02-13T09:10:05Z",
+    "count": 1
+  },
+  {
+    "apiVersion": "v1",
+    "kind": "Event",
+    "metadata": {
+      "name": "frontend-789.19c4d5e8",
+      "namespace": "staging"
+    },
+    "involvedObject": {
+      "kind": "Pod",
+      "name": "frontend-789",
+      "namespace": "staging"
+    },
+    "reason": "ImagePullBackOff",
+    "type": "Warning",
+    "message": "Back-off pulling image \"registry.internal/frontend:v2.1.0\"",
+    "firstTimestamp": "2025-02-13T09:11:00Z",
+    "lastTimestamp": "2025-02-13T09:20:00Z",
+    "count": 5
+  }
+]
