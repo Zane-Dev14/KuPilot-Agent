@@ -12,7 +12,7 @@ services:
       - ETCD_ELECTION_TIMEOUT=1000
     volumes:
       - etcd_data:/etcd
-    command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls=http://0.0.0.0:2379 -max-request-bytes=10485760
+    command: etcd -advertise-client-urls=http://0.0.0.0:2379 -listen-client-urls=http://0.0.0.0:2379 -max-request-bytes=10485760
     networks:
       - milvus
 
