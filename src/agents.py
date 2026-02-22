@@ -1,5 +1,6 @@
 """DeepAgents definitions for Kubernetes diagnosis."""
 
+import os
 from typing import Optional
 from deepagents import create_deep_agent
 from langchain.chat_models import init_chat_model
@@ -8,38 +9,45 @@ from src.tools import ALL_TOOLS
 from src.config import get_settings
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Model factory — configurable via AGENT_MODEL env var
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _get_model():
+    """Create the LLM. Override model with AGENT_MODEL env var."""
+    settings = get_settings()
+    model_name = os.environ.get("AGENT_MODEL", "ollama:qwen2.5-coder:14b")
+    return init_chat_model(
+        model_name,
+        base_url=settings.ollama_base_url,
+        temperature=0.1,
+        num_predict=1024,   # limit output tokens for speed
+    )
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Investigator Agent (ReAct loop)
 # ─────────────────────────────────────────────────────────────────────────────
 
 _INVESTIGATOR_PROMPT = """\
-You are a Kubernetes failure investigator. Your job is to diagnose why workloads are failing.
+You are a Kubernetes failure investigator. Diagnose why workloads fail.
 
-You have access to tools for:
-- Cluster inspection: kubectl_exec, cluster_snapshot, analyze_logs
-- Knowledge retrieval: retrieve_docs
-- Root cause analysis: generate_hypotheses
-- Remediation: generate_fix, verify_fix, validate_manifest
+Tools: kubectl_exec, cluster_snapshot, analyze_logs, retrieve_docs, generate_hypotheses, generate_fix, verify_fix, validate_manifest.
 
-Your process:
-1. Collect cluster state and logs via cluster_snapshot and analyze_logs
-2. Retrieve relevant documentation with retrieve_docs
-3. Generate hypotheses with generate_hypotheses
-4. For the most likely cause, generate_fix and verify_fix
-5. Return a structured diagnosis with root cause, evidence, and fix
+Process: collect state → analyze logs → retrieve docs → hypothesize → fix → verify.
 
-Be thorough but concise. Always cite evidence from logs, events, and documentation.
-"""
+Call ONE tool at a time. After getting results, call the next tool or give your final answer.
+
+When done, respond in plain text with:
+Root Cause: [issue]
+Evidence: [logs/events]
+Fix: [commands]
+Risk Level: [low/medium/high]
+
+Do NOT call tools after giving the final answer."""
 
 
 def create_investigator_agent():
     """Create a ReAct-based Kubernetes investigator agent."""
-    settings = get_settings()
-    
-    model = init_chat_model(
-        "ollama:qwen2.5-coder:14b",
-        base_url=settings.ollama_base_url,
-        temperature=0.1,
-    )
+    model = _get_model()
     
     agent = create_deep_agent(
         name="k8s-investigator",

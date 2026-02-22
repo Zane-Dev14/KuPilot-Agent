@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     embedding_device: str = "mps"
     reranker_model: str = "BAAI/bge-reranker-v2-m3"
     simple_model: str = "llama3.1:8b-instruct-q8_0"
-    complex_model: str = "Qwen3-coder:30b"
+    complex_model: str = "qwen2.5-coder:14b"
     ollama_base_url: str = "http://localhost:11434"
     query_complexity_threshold: float = 0.7
     chunk_size: int = 1000

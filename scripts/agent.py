@@ -1,298 +1,267 @@
 #!/usr/bin/env python3
-"""Unified K8s Failure Intelligence Agent - Simplified, Reliable Version."""
+"""Unified K8s Failure Intelligence Agent — with step tracing & speed fixes."""
 
-import json
-import sys
-import os
+import json, re, sys, os, time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from rich.console import Console
 from rich.panel import Panel
-from rich.table import Table
 
 console = Console()
 
+
+# ── Tool registry ────────────────────────────────────────────────────────────
+
 def _build_tool_registry():
     from src.tools import ALL_TOOLS
-    registry = {}
-    for tool in ALL_TOOLS:
-        name = getattr(tool, "name", None) or getattr(tool, "__name__", "")
-        if name:
-            registry[name] = tool
-    return registry
+    return {getattr(t, "name", "") or getattr(t, "__name__", ""): t
+            for t in ALL_TOOLS if getattr(t, "name", None) or getattr(t, "__name__", None)}
 
-def _parse_tool_call(text):
+
+def _parse_tool_calls(text):
+    """Extract ALL tool calls from text — handles code fences, raw JSON, mixed content."""
     if not isinstance(text, str):
-        return None
-    text = text.strip()
-    if not text.startswith("{"):
-        return None
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(payload, dict):
-        return None
-    if "name" in payload and "arguments" in payload:
-        return {"name": payload["name"], "arguments": payload["arguments"]}
-    return None
+        return []
+    calls = []
+    # 1) Find all ```json ... ``` fenced blocks
+    for m in re.finditer(r'```(?:json)?\s*\n?(\{.*?\})\s*\n?```', text, re.DOTALL):
+        try:
+            p = json.loads(m.group(1))
+            if isinstance(p, dict) and "name" in p and "arguments" in p:
+                calls.append({"name": p["name"], "arguments": p["arguments"]})
+        except json.JSONDecodeError:
+            pass
+    # 2) Fallback: try whole text as raw JSON
+    if not calls:
+        s = text.strip()
+        if s.startswith("{"):
+            try:
+                p = json.loads(s)
+                if isinstance(p, dict) and "name" in p and "arguments" in p:
+                    calls.append({"name": p["name"], "arguments": p["arguments"]})
+            except json.JSONDecodeError:
+                pass
+    return calls
 
 
-def _run_agent_with_tools(agent, query, max_steps=4):
+# ── Agent execution loop with step tracing ───────────────────────────────────
+
+def _truncate(text, max_len=600):
+    """Keep tool results short to avoid prompt bloat (speed fix)."""
+    return text if len(text) <= max_len else text[:max_len] + f"\n...(truncated, {len(text)} total)"
+
+
+def run_agent_with_tools(agent, query, max_steps=10, verbose=True):
+    """Execute agent with tool loop. Returns (response_text, steps_list)."""
     from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
     registry = _build_tool_registry()
     messages = [HumanMessage(content=query)]
-    last_ai = None
+    steps, last_ai = [], None
 
-    for _ in range(max_steps):
+    for step in range(1, max_steps + 1):
+        t0 = time.time()
         result = agent.invoke({"messages": messages})
-        print(f"Result: {result}")
+        llm_ms = int((time.time() - t0) * 1000)
+
         if isinstance(result, dict) and "messages" in result:
             messages = result["messages"]
         elif hasattr(result, "messages"):
-            messages = result['messages']
+            messages = result["messages"]
         else:
-            return str(result), messages
+            return str(result), steps
 
         if not messages:
-            return "", messages
+            return "", steps
 
         last = messages[-1]
-        if isinstance(last, AIMessage):
-            last_ai = last
-            tool_calls = getattr(last, "tool_calls", None) or []
-            if tool_calls:
-                for call in tool_calls:
-                    tool_name = call.get("name")
-                    tool_args = call.get("args") or call.get("arguments") or {}
-                    tool = registry.get(tool_name)
-                    if not tool:
-                        continue
-                    tool_result = tool.invoke(tool_args)
-                    messages.append(ToolMessage(
-                        content=json.dumps(tool_result, indent=2),
-                        name=tool_name,
-                        tool_call_id=call.get("id", tool_name),
-                    ))
+        if not isinstance(last, AIMessage):
+            continue
+        last_ai = last
+
+        # ── Collect tool calls (structured OR text-parsed) ──
+        tool_calls = getattr(last, "tool_calls", None) or []
+        parsed = _parse_tool_calls(last.content) if not tool_calls else []
+
+        # Normalize: convert both formats to a list of (name, args, call_id)
+        normalized = []
+        for c in tool_calls:
+            normalized.append((c.get("name"), c.get("args") or c.get("arguments") or {},
+                               c.get("id", c.get("name"))))
+        for c in parsed:
+            normalized.append((c["name"], c["arguments"], c["name"]))
+
+        if not normalized:
+            # No tool calls → final response
+            steps.append({"step": step, "type": "final", "llm_ms": llm_ms})
+            if verbose:
+                console.print(f"  [dim]Step {step}[/dim] [green]✓ Final answer[/green] [dim]{llm_ms}ms[/dim]")
+            return last.content, steps
+
+        # Execute each tool call
+        for tool_name, tool_args, call_id in normalized:
+            si = {"step": step, "type": "tool_call", "name": tool_name,
+                  "args": tool_args, "llm_ms": llm_ms}
+            if verbose:
+                args_preview = json.dumps(tool_args)[:80]
+                console.print(f"  [dim]Step {step}[/dim] [cyan]→ {tool_name}[/cyan]({args_preview}) [dim]{llm_ms}ms[/dim]")
+
+            tool = registry.get(tool_name)
+            if not tool:
+                err = f"Tool '{tool_name}' not found. Available: {', '.join(registry.keys())}"
+                si["error"] = err
+                steps.append(si)
+                messages.append(ToolMessage(content=err, name=tool_name, tool_call_id=call_id))
+                if verbose:
+                    console.print(f"           [red]✗ {err}[/red]")
                 continue
 
-            parsed = _parse_tool_call(last.content)
-            if parsed:
-                tool = registry.get(parsed["name"])
-                if tool:
-                    tool_result = tool.invoke(parsed["arguments"])
-                    messages.append(ToolMessage(
-                        content=json.dumps(tool_result, indent=2),
-                        name=parsed["name"],
-                        tool_call_id=parsed["name"],
-                    ))
-                    continue
+            try:
+                t1 = time.time()
+                tool_result = tool.invoke(tool_args)
+                tool_ms = int((time.time() - t1) * 1000)
+                result_str = json.dumps(tool_result, indent=2)
+                si["result"] = result_str[:500]
+                si["tool_ms"] = tool_ms
+                steps.append(si)
+                if verbose:
+                    console.print(f"           [green]✓[/green] [dim]{tool_ms}ms, {len(result_str)} chars[/dim]")
+                messages.append(ToolMessage(content=_truncate(result_str), name=tool_name, tool_call_id=call_id))
+            except Exception as e:
+                si["error"] = str(e)
+                steps.append(si)
+                if verbose:
+                    console.print(f"           [red]✗ {e}[/red]")
+                messages.append(ToolMessage(content=f"Error: {e}", name=tool_name, tool_call_id=call_id))
 
-            return last.content, messages
+    return (last_ai.content if last_ai else ""), steps
 
-    return last_ai.content if last_ai else "", messages
-    
+
+# ── Interactive mode ─────────────────────────────────────────────────────────
+
 def run_interactive_mode():
-    """Interactive chat mode."""
-    console.print(Panel("[bold cyan]K8s Failure Intelligence Agent[/bold cyan]\n[yellow]ReAct + RAG[/yellow]",
-                       border_style="cyan", expand=False))
+    console.print(Panel("[bold cyan]K8s Failure Intelligence Agent[/bold cyan]\n"
+                        "[yellow]ReAct + RAG — Step tracing enabled[/yellow]",
+                        border_style="cyan", expand=False))
     console.print("[dim]Type 'exit' to quit[/dim]\n")
-    
+
     try:
         from src.agents import create_investigator_agent
         agent = create_investigator_agent()
     except Exception as e:
         console.print(f"[red]Failed to load agent:[/red] {e}")
         return
-    
+
     while True:
         try:
             query = console.input("[bold cyan]You:[/bold cyan] ").strip()
         except (KeyboardInterrupt, EOFError):
             console.print("\n[yellow]Goodbye![/yellow]")
             break
-        
         if query.lower() in ("exit", "quit"):
             console.print("[yellow]Goodbye![/yellow]")
             break
         if not query:
             continue
-        
-        console.print("\n[bold magenta]⏳ Agent invoking...[/bold magenta]\n")
-        
-        try:
-            response_text, _ = _run_agent_with_tools(agent, query, max_steps=5)
-            if response_text:
-                console.print("\n[bold green]═════════════════════[/bold green]")
-                console.print("[bold cyan]Response:[/bold cyan]\n")
-                console.print(response_text)
-                console.print("[bold green]═════════════════════[/bold green]\n")
-            else:
-                console.print("[yellow]Agent returned no response[/yellow]\n")
-        
-        except Exception as e:
-            console.print(f"[red]Error:[/red] {e}\n")
-            import traceback
-            traceback.print_exc()
 
+        console.print("\n[bold magenta]⏳ Thinking...[/bold magenta]")
+        t0 = time.time()
+        try:
+            response, steps = run_agent_with_tools(agent, query, max_steps=10, verbose=True)
+            total_ms = int((time.time() - t0) * 1000)
+            console.print(f"\n  [dim]Total: {total_ms}ms, {len(steps)} steps[/dim]")
+            if response:
+                console.print(Panel(response, title="[bold cyan]Response[/bold cyan]",
+                                    border_style="green", expand=False))
+            else:
+                console.print("[yellow]Agent returned no response[/yellow]")
+        except Exception as e:
+            console.print(f"[red]Error:[/red] {e}")
+            import traceback; traceback.print_exc()
+        console.print()
+
+
+# ── Test mode ────────────────────────────────────────────────────────────────
 
 def run_test_mode():
-    """Simple test mode."""
-    console.print(Panel("[bold cyan]K8s Agent Test[/bold cyan]\n[yellow]Testing tools[/yellow]",
-                       border_style="cyan", expand=False))
-    
+    console.print(Panel("[bold cyan]K8s Agent Test[/bold cyan]\n[yellow]Testing tools directly[/yellow]",
+                        border_style="cyan", expand=False))
     try:
-        from src.tools import (
-            generate_hypotheses, analyze_logs, generate_fix, verify_fix
-        )
+        from src.tools import generate_hypotheses, analyze_logs, generate_fix, verify_fix
     except Exception as e:
-        console.print(f"[red]Failed to load tools:[/red] {e}")
-        return
-    
+        console.print(f"[red]Failed to load tools:[/red] {e}"); return
+
     query = "pod crashing with OOMKilled errors"
     console.print(f"\n[bold cyan]Testing with:[/bold cyan] {query}\n")
-    
-    # Step 1: Hypotheses
+
     console.print("[yellow]Step 1: Generating hypotheses...[/yellow]")
-    try:
-        hyp = generate_hypotheses.invoke({"symptoms": query})
-        console.print(f"✓ Got {len(hyp.get('hypotheses', []))} hypotheses")
-        if hyp.get('hypotheses'):
-            print(f"  • {hyp['hypotheses'][0]['cause']}")
-    except Exception as e:
-        console.print(f"[red]Error:[/red] {e}")
-        return
-    
-    # Step 2: Logs
+    hyp = generate_hypotheses.invoke({"symptoms": query})
+    console.print(f"✓ Got {len(hyp.get('hypotheses', []))} hypotheses")
+    if hyp.get('hypotheses'):
+        console.print(f"  • {hyp['hypotheses'][0]['cause']}")
+
     console.print("\n[yellow]Step 2: Analyzing logs...[/yellow]")
-    try:
-        logs = analyze_logs.invoke({"pod_name": "data-processor", "namespace": "default"})
-        console.print(f"✓ {logs.get('summary', 'Analyzed logs')}")
-    except Exception as e:
-        console.print(f"[red]Error:[/red] {e}")
-    
-    # Step 3: Fix
+    logs = analyze_logs.invoke({"pod_name": "data-processor", "namespace": "default"})
+    console.print(f"✓ {logs.get('summary', 'done')}")
+
     console.print("\n[yellow]Step 3: Generating fix...[/yellow]")
-    try:
-        if hyp.get('hypotheses'):
-            fix = generate_fix.invoke({"hypothesis": hyp['hypotheses'][0]['cause'], "manifest_yaml": None})
-            console.print(f"✓ Fix risk score: {fix.get('risk_score', 0):.0%}")
-            if fix.get('commands'):
-                console.print(f"✓ {len(fix['commands'])} commands to execute")
-    except Exception as e:
-        console.print(f"[red]Error:[/red] {e}")
-    
-    # Step 4: Verify
+    fix = generate_fix.invoke({"hypothesis": hyp['hypotheses'][0]['cause'], "manifest_yaml": None})
+    console.print(f"✓ Risk: {fix.get('risk_score', 0):.0%}, {len(fix.get('commands', []))} commands")
+
     console.print("\n[yellow]Step 4: Verifying fix...[/yellow]")
-    try:
-        if hyp.get('hypotheses') and fix.get('commands'):
-            ver = verify_fix.invoke({"fix_commands": fix['commands'], "cluster_health_check": "healthy"})
-            console.print(f"✓ Likely effective: {ver.get('likely_effective', False)}")
-    except Exception as e:
-        console.print(f"[red]Error:[/red] {e}")
-    
+    ver = verify_fix.invoke({"fix_commands": fix['commands'], "cluster_health_check": "healthy"})
+    console.print(f"✓ Likely effective: {ver.get('likely_effective', False)}")
+
     console.print("\n[green]✓ Test complete[/green]")
 
 
-def run_demo_mode():
-    """Demo mode - show workflow."""
-    console.print(Panel("[bold cyan]K8s Agent Demo[/bold cyan]\n[yellow]Full Workflow[/yellow]",
-                       border_style="cyan", expand=False))
-    
-    try:
-        from src.tools import (
-            retrieve_docs, generate_hypotheses, analyze_logs,
-            generate_fix, verify_fix
-        )
-    except Exception as e:
-        console.print(f"[red]Failed to load tools:[/red] {e}")
-        return
-    
-    print("\n" + "="*60)
-    print("  K8S FAILURE INTELLIGENCE - WORKFLOW DEMO")
-    print("="*60)
-    
-    query = "why is my data-processor pod crashing with OOMKilled"
-    print(f"\n👤 Query: {query}\n")
-    
-    # Step 1: RAG
-    print("[STEP 1] RAG RETRIEVAL")
-    print("-" * 40)
-    try:
-        rag = retrieve_docs.invoke({"query": "OOMKilled memory limit", "top_k": 3})
-        print(f"✓ Retrieved {rag.get('count', 0)} documents\n")
-    except Exception as e:
-        print(f"⚠ RAG unavailable: {e}\n")
-    
-    # Step 2: Logs
-    print("[STEP 2] ANALYZE SYMPTOMS")
-    print("-" * 40)
-    try:
-        logs = analyze_logs.invoke({"pod_name": "data-processor", "namespace": "default"})
-        print(f"✓ {logs.get('summary', 'Analyzed logs')}\n")
-    except Exception as e:
-        print(f"✗ Error: {e}\n")
-    
-    # Step 3: Hypotheses
-    print("[STEP 3] ROOT CAUSE HYPOTHESES")
-    print("-" * 40)
-    try:
-        hyp = generate_hypotheses.invoke({"symptoms": "Pod crashing, OOMKilled"})
-        hyps = hyp.get('hypotheses', [])
-        print(f"✓ Generated {len(hyps)} hypotheses")
-        if hyps:
-            print(f"  Top: {hyps[0]['cause']}")
-            print(f"  Confidence: {hyps[0].get('confidence', 0):.0%}\n")
-    except Exception as e:
-        print(f"✗ Error: {e}\n")
-    
-    # Step 4: Fix
-    print("[STEP 4] FIX GENERATION")
-    print("-" * 40)
-    try:
-        if hyps:
-            fix = generate_fix.invoke({"hypothesis": hyps[0]['cause'], "manifest_yaml": None})
-            print(f"✓ Risk Score: {fix.get('risk_score', 0):.0%}")
-            print(f"✓ Commands: {len(fix.get('commands', []))}\n")
-    except Exception as e:
-        print(f"✗ Error: {e}\n")
-    
-    # Step 5: Verify
-    print("[STEP 5] VERIFICATION")
-    print("-" * 40)
-    try:
-        if fix:
-            ver = verify_fix.invoke({"fix_commands": fix.get('commands', []), "cluster_health_check": "healthy"})
-            print(f"✓ Effective: {ver.get('likely_effective', False)}")
-            print(f"✓ Missing steps: {len(ver.get('missing_steps', []))}\n")
-    except Exception as e:
-        print(f"✗ Error: {e}\n")
-    
-    print("="*60)
-    print("  DEMO COMPLETE")
-    print("="*60)
+# ── Demo mode ────────────────────────────────────────────────────────────────
 
+def run_demo_mode():
+    console.print(Panel("[bold cyan]K8s Agent Demo[/bold cyan]\n[yellow]Full Workflow[/yellow]",
+                        border_style="cyan", expand=False))
+    try:
+        from src.tools import retrieve_docs, generate_hypotheses, analyze_logs, generate_fix, verify_fix
+    except Exception as e:
+        console.print(f"[red]Failed to load tools:[/red] {e}"); return
+
+    query = "why is my data-processor pod crashing with OOMKilled"
+    print(f"\n{'='*60}\n  K8S FAILURE INTELLIGENCE - WORKFLOW DEMO\n{'='*60}")
+    print(f"\n👤 Query: {query}\n")
+
+    for label, fn in [
+        ("[STEP 1] RAG RETRIEVAL", lambda: retrieve_docs.invoke({"query": "OOMKilled memory limit", "top_k": 3})),
+        ("[STEP 2] ANALYZE SYMPTOMS", lambda: analyze_logs.invoke({"pod_name": "data-processor", "namespace": "default"})),
+        ("[STEP 3] HYPOTHESES", lambda: generate_hypotheses.invoke({"symptoms": "Pod crashing, OOMKilled"})),
+        ("[STEP 4] FIX GENERATION", lambda: generate_fix.invoke({"hypothesis": "Out-of-Memory (OOMKilled): Pod memory request too low or memory leak in app.", "manifest_yaml": None})),
+    ]:
+        print(f"{label}\n{'-'*40}")
+        try:
+            r = fn()
+            for k, v in (r.items() if isinstance(r, dict) else []):
+                if k in ("summary", "count", "risk_score", "hypotheses", "commands"):
+                    print(f"  {k}: {v}")
+            print()
+        except Exception as e:
+            print(f"  ⚠ {e}\n")
+
+    print(f"{'='*60}\n  DEMO COMPLETE\n{'='*60}")
+
+
+# ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="K8s Failure Intelligence Agent")
-    parser.add_argument("--mode", choices=["interactive", "test", "demo"], default="interactive",
-                       help="Operation mode")
-    parser.add_argument("--verbose", action="store_true", help="Debug output")
+    parser.add_argument("--mode", choices=["interactive", "test", "demo"], default="interactive")
+    parser.add_argument("--verbose", action="store_true", help="Debug logging")
     args = parser.parse_args()
-    
+
     if args.verbose:
-        import logging
-        logging.basicConfig(level=logging.DEBUG)
-    
-    if args.mode == "interactive":
-        run_interactive_mode()
-    elif args.mode == "test":
-        run_test_mode()
-    else:
-        run_demo_mode()
+        import logging; logging.basicConfig(level=logging.DEBUG)
+
+    {"interactive": run_interactive_mode, "test": run_test_mode, "demo": run_demo_mode}[args.mode]()
 
 
 if __name__ == "__main__":

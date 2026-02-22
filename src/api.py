@@ -166,6 +166,46 @@ async def clear_memory(request: Request):
     return {"status": "ok", "session_id": sid}
 
 
+# ── Agent endpoints ──────────────────────────────────────────────────────────
+
+class AgentRequest(BaseModel):
+    query: str = Field(..., min_length=1)
+    max_steps: int = Field(default=10, ge=1, le=20)
+
+_agent_instance = None
+
+def _get_agent():
+    global _agent_instance
+    if _agent_instance is None:
+        from src.agents import create_investigator_agent
+        _agent_instance = create_investigator_agent()
+    return _agent_instance
+
+
+@app.post("/agent/invoke")
+async def agent_invoke(request: AgentRequest):
+    """Run the agent and return response + step trace."""
+    try:
+        agent = _get_agent()
+        # Import here to avoid circular
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from agent import run_agent_with_tools
+        response, steps = await run_in_threadpool(
+            run_agent_with_tools, agent, request.query,
+            request.max_steps, False  # verbose=False for API
+        )
+        return {"response": response, "steps": steps}
+    except Exception as e:
+        logger.error("Agent invoke failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/agent", response_class=HTMLResponse)
+async def agent_ui(request: Request):
+    """Agent chat UI with step trace viewer."""
+    return templates.TemplateResponse("agent.html", {"request": request})
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")

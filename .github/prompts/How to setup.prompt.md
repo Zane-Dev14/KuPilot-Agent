@@ -1,206 +1,175 @@
-Plan: DeepAgents Multi-Agent Migration
+Plan: DeepAgents Multi-Agent K8s Failure Intelligence — Simplified
 
-TL;DR — Incrementally transform your existing RAG-powered K8s diagnosis app into a DeepAgents-based multi-agent system. The existing `src/` modules (vectorstore, ingestion, memory, config, rag_chain) become the foundation that new tool classes wrap. Five agents (Orchestrator, Investigator, Knowledge, Remediation, Verification) are built as DeepAgents subagents with shared tools. Both CLI and Web UI remain functional at every step. A GitHub Actions workflow covers lint, tests, Docker build, and push.
+TL;DR — Extend your working K8s diagnosis app into a multi-agent DeepAgents system. Keep the existing structure flat: no new directories. Add four new subagent definitions directly in `src/agents.py`, extend `scripts/agent.py` with orchestrator mode, and add `/agent/diagnose` endpoint to `src/api.py`. Reuse all existing tools (src/tools.py), config (src/config.py), vectorstore (src/vectorstore.py), and incident state (src/incident.py).
 
 ---
 
-Steps
+## Completed Work
 
-Phase 0 — Structural Preparation
+✅ **Phase 0 (Done)**
+- `requirements.txt`: deepagents==0.4.0, langgraph>=0.4.0, langchain>=1.2.0, all dependencies resolved and working
+- `src/config.py`: Existing Settings reused globally
+- `src/tools.py`: 8 @tool functions fully implemented (kubectl_exec, cluster_snapshot, analyze_logs, validate_manifest, retrieve_docs, generate_hypotheses, generate_fix, verify_fix)
+- `src/agents.py`: create_investigator_agent() defined and working
 
-1. Create new directories alongside the existing `src/`:
-   - `agents/`          # Agent definitions (one file per agent + factory)
-   - `tools/`           # Tool interfaces & implementations
-   - `rag/`             # RAG abstractions (wraps existing src/vectorstore.py + src/ingestion.py)
-   - `models/`          # Model configuration (Ollama init_chat_model wrapper)
-   - `orchestration/`   # Incident state store, message bus, agent wiring
-   - `storage/`         # Incident store (JSON-backed shared state)
-   - `.github/workflows/`  # CI/CD
+✅ **Phase 1 (Done)**
+- `scripts/agent.py`: Unified CLI with three modes (interactive, test, demo)
+  - interactive: Full ReAct loop with tool execution
+  - test: Direct 4-step tool test (no agent)
+  - demo: Synchronous 5-step workflow demo
+- Tool execution loop working: agents detect and execute tool calls, feed results back
 
-   Each directory gets an `__init__.py`. No existing files are moved or deleted.
+✅ **Requirements Status**
+- All pip conflicts resolved (pydantic, pymilvus, sentence-transformers, langchain-core)
+- Environment fully functional: `./.venv/bin/python scripts/agent.py --mode test` ✓
 
-2. Update `requirements.txt` — add:
-   - `deepagents>=0.4.0`
-   - `langgraph>=0.4.0` (DeepAgents dependency, pin explicitly)
-   - `ruff>=0.9.0` (linter for CI)
+---
 
-3. Create `models/config.py` — a single reusable model factory:
-   - Function `get_model()` that calls `langchain.chat_models.init_chat_model("ollama:qwen2.5-coder:14b")` with shared defaults (temperature, timeout, base_url from existing `Settings`)
-   - Falls back to existing `src/config.py` `Settings` for Ollama host/port
-   - All agents import from here — single model, single config point
+## Next Steps (What Remains)
 
-Phase 1 — Tool Interfaces (Scaffolding Only)
+### Phase 2 — Add Subagents to `src/agents.py`
 
-Create 8 tool files in `tools/`, each exporting a decorated `@tool` function (or class with `__call__`) with full docstrings, typed parameters, and Pydantic return schemas. No heavy logic — just the interface contract.
+1. **Knowledge Agent** — RAG + Documentation
+   - Tools: `retrieve_docs` only
+   - Prompt: "You are a Kubernetes knowledge expert. Retrieve and explain relevant runbooks and documentation from the enterprise knowledge base."
+   - Function: `create_knowledge_agent()` → DeepAgent instance
 
-4. `tools/kubectl.py` — `KubectlTool`
-   - `kubectl_exec(command: str, namespace: str = "default", output_format: str = "json") -> dict`
-   - Allowlist: `get`, `describe`, `logs`, `top`, `events`. Blocks `delete`, `apply` (unless `dry_run=True`)
-   - Real cluster mode: calls `subprocess.run(["kubectl", ...])` with timeout
-   - Simulation fallback: if kubeconfig missing, reads from `data/sample/` files matching the resource type
-   - Returns structured `{"status": "ok"|"error", "output": ..., "command": ...}`
+2. **Remediation Agent** — Fix Generation & Validation
+   - Tools: `generate_fix`, `validate_manifest`
+   - Prompt: "You are a remediation specialist. Generate safe, risk-assessed Kubernetes fixes and validate their YAML."
+   - Function: `create_remediation_agent()` → DeepAgent instance
 
-5. `tools/cluster_snapshot.py` — `ClusterSnapshotTool`
-   - `collect_snapshot(namespace: str = "default") -> dict`
-   - Orchestrates multiple kubectl calls (pods, events, resource quotas)
-   - Returns `{"pods": [...], "events": [...], "metrics": {...}, "timestamp": ...}`
+3. **Verification Agent** — Safety & Risk Assessment
+   - Tools: `verify_fix`, `kubectl_exec` (read-only: get, describe, logs)
+   - Prompt: "You are a verification expert. Evaluate proposed fixes for safety, missing steps, and unintended consequences."
+   - Function: `create_verification_agent()` → DeepAgent instance
 
-6. `tools/log_analysis.py` — `LogAnalysisTool`
-   - `analyze_logs(pod_name: str, namespace: str, tail_lines: int = 100) -> dict`
-   - Fetches logs via KubectlTool, summarizes, detects anomaly patterns (OOM, crash, connection refused)
-   - Returns `{"summary": str, "anomalies": [...], "raw_tail": str}`
+4. **Orchestrator Agent** — Multi-Agent Coordinator
+   - **Subagents**: Investigator, Knowledge, Remediation, Verification
+   - Tools: `cluster_snapshot` (for initial triage)
+   - Prompt: "You are the K8s Failure Intelligence Orchestrator. When a failure is reported: (1) Collect cluster snapshot, (2) Delegate investigation to Investigator agent, (3) Retrieve knowledge via Knowledge agent, (4) Generate fixes via Remediation agent, (5) Validate via Verification agent. Synthesize all results into a final diagnosis."
+   - Function: `create_orchestrator_agent()` → DeepAgent with subagents
+   - **Implementation detail**: Pass other agents via the `subagents=[...]` parameter of `create_deep_agent()`, or langgraph StateGraph if needed
 
-7. `tools/manifest_validator.py` — `ManifestValidatorTool`
-   - `validate_manifest(yaml_content: str, dry_run: bool = True) -> dict`
-   - YAML parse check, resource limits check, image format check
-   - Optional `kubectl apply --dry-run=client` via KubectlTool
-   - Returns `{"valid": bool, "issues": [...], "dry_run_result": ...}`
+---
 
-8. `tools/rag_retrieval.py` — `RAGRetrievalTool`
-   - `retrieve(query: str, top_k: int = 5, source_type: str | None = None) -> dict`
-   - Wraps existing `src/vectorstore.py` `MilvusStore.search()` + `rerank()`
-   - `source_type` filter: `"runbook"`, `"event"`, `"manifest"`, `"log"`, `"incident"`
-   - Returns `{"results": [{"content": str, "metadata": dict, "score": float}]}`
+### Phase 3 — Update CLI (`scripts/agent.py`)
 
-9. `tools/root_cause.py` — `RootCauseHypothesisTool`
-   - `generate_hypotheses(symptoms: dict) -> dict`
-   - Takes cluster snapshot + log anomalies, produces ranked hypotheses
-   - Returns `{"hypotheses": [{"cause": str, "confidence": float, "tests": [str]}]}`
+1. Add new mode: `--mode orchestrator`
+   - Invokes the orchestrator agent from `src/agents.py`
+   - Same tool execution loop as current interactive mode
+   - Example: `python scripts/agent.py --mode orchestrator`
 
-10. `tools/fix_generator.py` — `FixGeneratorTool`
-    - `generate_fix(hypothesis: dict, manifest: str | None = None) -> dict`
-    - Produces patch YAML, kubectl commands, risk score
-    - Returns `{"patches": [...], "commands": [...], "risk_score": float, "explanation": str}`
+2. Keep existing modes (interactive, test, demo) unchanged
 
-11. `tools/verification.py` — `VerificationTool`
-    - `verify_fix(fix: dict, cluster_state: dict) -> dict`
-    - Predicts outcome, checks for missing steps, flags risks
-    - Returns `{"likely_effective": bool, "missing_steps": [...], "risks": [...]}`
+3. Example test:
+   ```bash
+   ./.venv/bin/python scripts/agent.py --mode orchestrator
+   # Enter: "Why is my data-processor pod crashing?"
+   # Agent orchestrates all subagents and returns synthesized diagnosis
+   ```
 
-Phase 2 — Agent Definitions
+---
 
-Each agent is a DeepAgents subagent dict (or `create_deep_agent` call) registered in `agents/`.
+### Phase 4 — Update Web API (`src/api.py`)
 
-12. `agents/knowledge.py` — Knowledge Agent
-    - Tools: `RAGRetrievalTool`
-    - System prompt: "You retrieve and explain Kubernetes failure documentation."
-    - Wraps existing `src/rag_chain.py` retrieval + reranking logic
+1. Add endpoint: `POST /agent/diagnose`
+   - Request body: `{"query": "Why is pod X crashing?", "max_steps": 5}`
+   - Delegates to orchestrator agent
+   - Returns: `{"type": "diagnosis", "root_cause": str, "evidence": [...], "fix": {...}, "verification": {...}}`
+   - Status code: 200 on success, 500 on agent error
 
-13. `agents/investigator.py` — Investigator Agent (ReAct)
-    - Tools: `KubectlTool`, `ClusterSnapshotTool`, `LogAnalysisTool`, `RootCauseHypothesisTool`
-    - System prompt: "You are a K8s investigator. Follow observe → hypothesize → test loops."
-    - This is the primary ReAct agent — DeepAgents' built-in planning (`write_todos`) drives the loop
+2. Keep existing `/diagnose` and `/diagnose/stream` unchanged (classic RAG mode)
 
-14. `agents/remediation.py` — Remediation Agent
-    - Tools: `FixGeneratorTool`, `ManifestValidatorTool`
-    - System prompt: "You generate safe remediations for Kubernetes failures."
+3. Example:
+   ```bash
+   curl -X POST http://localhost:8000/agent/diagnose \
+     -H "Content-Type: application/json" \
+     -d '{"query": "Pod OOMKilled", "max_steps": 5}'
+   ```
 
-15. `agents/verification.py` — Verification Agent
-    - Tools: `VerificationTool`, `KubectlTool` (read-only subset)
-    - System prompt: "You evaluate proposed fixes and flag risks."
+---
 
-16. `agents/orchestrator.py` — Orchestrator Agent (top-level)
-    - Created via `create_deep_agent()` with subagents: Investigator, Knowledge, Remediation, Verification
-    - Tools: `ClusterSnapshotTool` (for initial triage)
-    - System prompt: "You are the K8s Failure Intelligence coordinator. Delegate diagnostic, knowledge, remediation, and verification tasks to your subagents."
-    - Uses `model="ollama:qwen2.5-coder:14b"` (from `models/config.py`)
+### Phase 5 — Testing & Validation
 
-Phase 3 — Shared State & Wiring
+1. Test each subagent independently:
+   ```python
+   from src.agents import create_knowledge_agent, create_remediation_agent
+   agent = create_knowledge_agent()
+   result = agent.invoke({"messages": [{"role": "user", "content": "OOMKilled"}]})
+   ```
 
-17. `storage/incident_store.py` — Shared incident state
-    - Pydantic model `Incident` with fields: `id`, `status`, `symptoms`, `snapshots`, `hypotheses`, `selected_fix`, `verification_result`, `timeline`
-    - JSON-backed persistence (extends pattern from `src/memory.py` `DiskChatMemory`)
-    - Agents read/write incident state between delegations
+2. Test orchestrator end-to-end:
+   ```bash
+   python scripts/agent.py --mode orchestrator
+   ```
 
-18. `orchestration/wiring.py` — Agent factory
-    - `create_k8s_agent() -> CompiledStateGraph` that assembles the full orchestrator with all subagents and tools
-    - Single entry point for both CLI and API
+3. Verify all tools are accessible:
+   ```bash
+   python -c "from src.tools import ALL_TOOLS; print(len(ALL_TOOLS))"
+   # Expected: 8
+   ```
 
-Phase 4 — Integration with Existing App
+---
 
-19. Update `src/api.py` — add new endpoint:
-    - `POST /agent/diagnose` — invokes orchestrator agent, streams back via SSE (same pattern as existing `/diagnose/stream`)
-    - Keep existing `/diagnose` and `/diagnose/stream` endpoints working unchanged
-    - Add `GET /agent/incidents` and `GET /agent/incidents/{id}` for incident history
+## Architecture Summary
 
-20. Update `scripts/chat.py` — add `--agent` flag:
-    - When `--agent` is passed, use the orchestrator agent instead of the existing RAG chain
-    - Same rich terminal output
+```
+User Query
+    ↓
+Orchestrator Agent (DeepAgents, subagents enabled)
+    ├→ Investigator (subagent) → tools: kubectl_exec, cluster_snapshot, analyze_logs, generate_hypotheses
+    ├→ Knowledge (subagent) → tools: retrieve_docs
+    ├→ Remediation (subagent) → tools: generate_fix, validate_manifest
+    └→ Verification (subagent) → tools: verify_fix
+         ↓
+    Synthesized Diagnosis + Fix + Verification Result
+         ↓
+    [CLI output] or [/agent/diagnose JSON response]
+```
 
-21. Update `templates/index.html` / `static/app.js`:
-    - Add toggle or new panel for "Agent Mode" vs "Classic RAG Mode"
-    - Agent mode hits `/agent/diagnose`, classic uses existing `/diagnose/stream`
+---
 
-Phase 5 — RAG Enhancement
+## File Changes Summary
 
-22. `rag/vectorstore_adapter.py` — thin adapter over existing `src/vectorstore.py`:
-    - Adds multi-collection support (separate collections for: runbooks, incidents, live_logs, snapshots)
-    - Exposes metadata-filtered search for the `RAGRetrievalTool`
-    - The existing `MilvusStore` class stays untouched — adapter calls into it
+| File | Change | Why |
+|------|---------|----|
+| `src/agents.py` | Add 4 agent factory functions (Knowledge, Remediation, Verification, Orchestrator) | Enable multi-agent coordination |
+| `scripts/agent.py` | Add `--mode orchestrator` | CLI access to orchestrator |
+| `src/api.py` | Add `POST /agent/diagnose` | Web API access to orchestrator |
+| `src/tools.py` | No change | Reuse all 8 existing tools |
+| `src/config.py` | No change | Reuse existing model factory |
+| `src/incident.py` | No change | Reuse existing state model |
+| `src/vectorstore.py` | No change | Reuse existing MilvusStore |
+| `requirements.txt` | No change | Already has deepagents, langgraph, all deps |
 
-23. `rag/indexer.py` — extends `src/ingestion.py`:
-    - Adds `index_incident()` — saves resolved incidents back into the vector store
-    - Adds `index_log_chunk()` — for live log ingestion during investigation
-    - Wraps existing `ingest_file()` / `ingest_directory()`
+---
 
-Phase 6 — CI/CD (GitHub Actions)
+## Verification Checklist
 
-24. Create `.github/workflows/ci.yml`:
+- [ ] `from src.agents import create_knowledge_agent, create_remediation_agent, create_verification_agent, create_orchestrator_agent` — all import without error
+- [ ] `python scripts/agent.py --mode orchestrator` — runs and accepts queries
+- [ ] `curl -X POST http://localhost:8000/agent/diagnose -d '{"query": "Pod failing"}'` — returns 200 with diagnosis
+- [ ] Existing `/diagnose` endpoint unchanged — still works
+- [ ] All 8 tools callable via orchestrator agent
 
-    How it works:
-    - Trigger: Runs on every push to `main` and on all pull requests
-    - Lint job: Checks out code → installs `ruff` → runs `ruff check .` and `ruff format --check .` to enforce code style
-    - Test job: Checks out code → starts Milvus via `docker compose up -d` → installs Python deps → runs `pytest tests/ -v` → reports results. Uses a service container for Milvus or the existing `docker-compose.yml`
-    - Build job (depends on lint + test passing): Builds a Docker image from a new `Dockerfile` (multi-stage: Python 3.11-slim, copies src/agents/tools/rag/models/orchestration/storage, installs deps, runs uvicorn)
-    - Push job (only on `main` branch merge): Tags image with commit SHA + `latest`, pushes to GitHub Container Registry (ghcr.io) using `GITHUB_TOKEN`
-    - Each job runs independently where possible (lint ∥ test), build waits for both, push waits for build
-    - Secrets needed: none beyond `GITHUB_TOKEN` (auto-provided) for GHCR
+---
 
-25. Create `Dockerfile` — multi-stage build:
-    - Stage 1: install Python dependencies
-    - Stage 2: copy app code, expose port 8000, run `uvicorn src.api:app`
+## Migration Order
 
-Migration Order (What to do first)
+1. **Add subagent factory functions to `src/agents.py`** (Knowledge, Remediation, Verification, Orchestrator)
+2. **Extend `scripts/agent.py` with `--mode orchestrator`**
+3. **Add `POST /agent/diagnose` to `src/api.py`**
+4. **Test each subagent and orchestrator**
+5. **Verify backward compatibility of existing endpoints**
 
-Order | What | Why
-1 | Create directories + `models/config.py` | Foundation, zero breakage
-2 | Tool interfaces (scaffolding) | Define contracts before agents
-3 | `KubectlTool` + `RAGRetrievalTool` (implement) | Most critical tools, prove the pattern
-4 | Knowledge Agent + Investigator Agent | First two agents using real tools
-5 | Orchestrator with subagent wiring | Minimum viable multi-agent
-6 | `POST /agent/diagnose` endpoint + CLI flag | Both interfaces get agent mode
-7 | Remaining tools + agents | Remediation, Verification
-8 | RAG enhancements (multi-collection, live indexing) | Advanced features
-9 | CI/CD + Dockerfile | Production readiness
+---
 
-Components Reused From Current Codebase
+## Decisions Made
 
-Current File | Reuse Strategy
-`src/config.py` | Directly imported by `models/config.py` for Ollama host, Milvus settings
-`src/vectorstore.py` | Wrapped by `rag/vectorstore_adapter.py` and `tools/rag_retrieval.py`
-`src/ingestion.py` | Wrapped by `rag/indexer.py` — same loaders, new entry points
-`src/memory.py` | Reused as-is for session memory; pattern extended for `storage/incident_store.py`
-`src/rag_chain.py` | Classification logic reused by Orchestrator for initial triage; RAG pipeline wrapped by Knowledge Agent
-`src/api.py` | Extended with new `/agent/*` endpoints — existing endpoints unchanged
-`scripts/chat.py` | Extended with `--agent` flag
-`docker-compose.yml` | Reused as-is for Milvus; extended with app service in Dockerfile
-`tests/test_basic.py` | Kept; new tests added in `tests/test_tools.py`, `tests/test_agents.py`
-`data/sample/*` | Used as simulation fallback for KubectlTool when no real cluster is available
-
-Verification
-
-- After Phase 0: `pytest tests/test_basic.py` still passes, `pip install -e .` works
-- After Phase 1-2: `python -c "from tools.kubectl import kubectl_exec"` imports without error
-- After Phase 3-4: `python -c "from orchestration.wiring import create_k8s_agent; a = create_k8s_agent()"` creates the agent graph
-- After Phase 5: Existing `/diagnose/stream` still works; new `/agent/diagnose` returns agent-driven diagnosis
-- After Phase 6: `gh workflow run ci.yml` passes all jobs; `docker build .` succeeds
-
-Decisions
-
-- Single model: `qwen2.5-coder:14b` via Ollama for all agents
-- No rewrite: Every existing file stays where it is; new code wraps/extends
-- Safety: `KubectlTool` allowlists read-only commands; `apply` forced to `--dry-run=client` unless explicit override
-- DeepAgents subagent pattern: Orchestrator is the top-level `create_deep_agent()`; other agents are subagent dicts passed via `subagents=[...]`
-- Simulation fallback: KubectlTool detects missing kubeconfig and transparently serves sample data
-
-Ready when you are — tell me which phase to start implementing, or if you'd like adjustments to the plan.
+- **No new directories**: Everything stays in `src/` and `scripts/` for simplicity
+- **Reuse all existing code**: No rewrites — only additions/extensions
+- **Single model**: All agents use same `qwen2.5-coder:14b` via Ollama
+- **Subagent pattern**: Orchestrator uses DeepAgents' native subagent support (`subagents=[...]` in `create_deep_agent()`)
+- **Tool allowlisting**: Investigator gets full kubectl read access; Verification gets read-only subset
+- **Backward compatible**: Existing RAG chain, CLI modes, and API endpoints unchanged

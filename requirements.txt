@@ -1,35 +1,35 @@
-# Pinned minimal requirements to avoid resolver backtracking
-# LangChain 1.x core, 0.x community/integrations for deepagents>=0.4.0
-
-# Core LangChain stack (mixed v1/v0 for compatibility)
-langchain>=1.2.0,<2.0.0
-langchain-core>=1.2.10,<2.0.0
-langchain-community>=0.3.0,<0.5.0
-langchain-text-splitters>=0.3.0,<0.5.0
-langchain-milvus>=0.1.10
+# ── Core LangChain stack ──────────────────────────────────
+langchain>=0.3.0,<1.0
+langchain-core>=0.3.0,<1.0
+langchain-community>=0.3.0,<1.0
+langchain-milvus>=0.1.0
 langchain-ollama>=0.2.0
 langchain-huggingface>=0.1.0
+langchain-text-splitters>=0.3.0
 
-# Vector DB & embeddings
-pymilvus>=2.5.5,<3.0
-sentence-transformers>=2.6.0,<3.0
+# ── Vector DB & embeddings ────────────────────────────────
+pymilvus>=2.4.0
+sentence-transformers>=3.0.0
 
-# Config & utilities
-pydantic>=2.7.4,<3.0
-pydantic-settings>=2.0.0
+# ── Config & utilities ────────────────────────────────────
+pydantic>=2.0
+pydantic-settings>=2.0
 pyyaml>=6.0
 python-dotenv>=1.0
 rich>=13.0
 
-# API server
+# ── API server ────────────────────────────────────────────
 fastapi>=0.100.0
 uvicorn>=0.24.0
 jinja2>=3.1.0
 
-# Dev / testing
-pytest>=8.3.0
+# ── Dev / testing ─────────────────────────────────────────
+pytest>=8.0
 
-# Project-specific
-deepagents==0.4.0
+
+
+# For week 3
+deepagents>=0.4.0
 langgraph>=0.4.0
 ruff>=0.9.0
+langchain_text_splitters
