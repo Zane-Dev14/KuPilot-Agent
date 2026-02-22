@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """Unified K8s Failure Intelligence Agent — with step tracing & speed fixes."""
 
-import json, re, sys, os, time
+import json
+import os
+import re
+import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from rich.console import Console
-from rich.panel import Panel
+from rich.console import Console  # noqa: E402
+from rich.panel import Panel  # noqa: E402
 
 console = Console()
 
@@ -178,7 +182,8 @@ def run_interactive_mode():
                 console.print("[yellow]Agent returned no response[/yellow]")
         except Exception as e:
             console.print(f"[red]Error:[/red] {e}")
-            import traceback; traceback.print_exc()
+            import traceback
+            traceback.print_exc()
         console.print()
 
 
@@ -188,9 +193,10 @@ def run_test_mode():
     console.print(Panel("[bold cyan]K8s Agent Test[/bold cyan]\n[yellow]Testing tools directly[/yellow]",
                         border_style="cyan", expand=False))
     try:
-        from src.tools import generate_hypotheses, analyze_logs, generate_fix, verify_fix
+        from src.tools import generate_hypotheses, analyze_logs, generate_fix, verify_fix  # noqa: F401
     except Exception as e:
-        console.print(f"[red]Failed to load tools:[/red] {e}"); return
+        console.print(f"[red]Failed to load tools:[/red] {e}")
+        return
 
     query = "pod crashing with OOMKilled errors"
     console.print(f"\n[bold cyan]Testing with:[/bold cyan] {query}\n")
@@ -222,9 +228,10 @@ def run_demo_mode():
     console.print(Panel("[bold cyan]K8s Agent Demo[/bold cyan]\n[yellow]Full Workflow[/yellow]",
                         border_style="cyan", expand=False))
     try:
-        from src.tools import retrieve_docs, generate_hypotheses, analyze_logs, generate_fix, verify_fix
+        from src.tools import retrieve_docs, generate_hypotheses, analyze_logs, generate_fix  # noqa: F811
     except Exception as e:
-        console.print(f"[red]Failed to load tools:[/red] {e}"); return
+        console.print(f"[red]Failed to load tools:[/red] {e}")
+        return
 
     query = "why is my data-processor pod crashing with OOMKilled"
     print(f"\n{'='*60}\n  K8S FAILURE INTELLIGENCE - WORKFLOW DEMO\n{'='*60}")
@@ -259,7 +266,8 @@ def main():
     args = parser.parse_args()
 
     if args.verbose:
-        import logging; logging.basicConfig(level=logging.DEBUG)
+        import logging
+        logging.basicConfig(level=logging.DEBUG)
 
     {"interactive": run_interactive_mode, "test": run_test_mode, "demo": run_demo_mode}[args.mode]()
 

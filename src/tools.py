@@ -3,15 +3,13 @@
 import json
 import logging
 import subprocess
-import yaml
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
-from datetime import datetime
 
+import yaml
 from langchain.tools import tool
-from pydantic import BaseModel
 
-from src.config import get_settings
 from src.vectorstore import MilvusStore
 
 logger = logging.getLogger(__name__)
@@ -45,15 +43,23 @@ def _load_sample_data(resource_type: str, name: str = "") -> dict:
 
 @tool
 def kubectl_exec(command: str, namespace: str = "default") -> dict:
-    """
-    Execute safe kubernetes commands. Read-only by default.
-    
+    """Execute safe read-only kubectl commands against the cluster.
+
+    ALLOWED commands (first word must be one of these):
+      get pods, get pod <real-pod-name>, describe pod <real-pod-name>,
+      logs <real-pod-name>, top pods, events
+
+    IMPORTANT: Always use actual pod names (e.g. "data-processor-7b8f9"),
+    never placeholders like <pod> or <your-pod>.
+
     Args:
-        command: kubectl verb (get, describe, logs, top, events)
-        namespace: kubernetes namespace
-    
+        command: the kubectl sub-command, e.g. "get pods" or
+                 "describe pod data-processor-7b8f9".
+        namespace: kubernetes namespace (default: "default").
+
     Returns:
-        {"status": "ok"|"error", "output": str, "stderr": str}
+        {"status": "ok" | "error", "output": "...",
+         "stderr": "...", "command": "..."}
     """
     return _kubectl_exec_impl(command, namespace)
 
@@ -93,14 +99,15 @@ def _kubectl_exec_impl(command: str, namespace: str = "default") -> dict:
 
 @tool
 def cluster_snapshot(namespace: str = "default") -> dict:
-    """
-    Collect a snapshot of cluster state: pods, events, resource status.
-    
+    """Collect a quick snapshot of pods and events in a namespace.
+
+    Use this for a broad overview before diving into specific pods.
+
     Args:
-        namespace: kubernetes namespace to snapshot
-    
+        namespace: kubernetes namespace to snapshot (default: "default").
+
     Returns:
-        {"pods": [...], "events": [...], "timestamp": str}
+        {"namespace": str, "pods": str, "events": list, "timestamp": str}
     """
     snapshot = {"namespace": namespace, "pods": [], "events": []}
     
@@ -122,7 +129,7 @@ def cluster_snapshot(namespace: str = "default") -> dict:
         except Exception:
             pass
     
-    snapshot["timestamp"] = datetime.utcnow().isoformat()
+    snapshot["timestamp"] = datetime.now().isoformat()
     return snapshot
 
 
@@ -140,16 +147,18 @@ _ANOMALIES = {
 
 @tool
 def analyze_logs(pod_name: str, namespace: str = "default", tail_lines: int = 100) -> dict:
-    """
-    Analyze logs from a pod, detect anomalies.
-    
+    """Analyze a pod's logs and detect anomaly patterns.
+
+    Detects: OOM, CrashLoop, ImagePull, Scheduling issues.
+    Use an actual pod name, not a placeholder.
+
     Args:
-        pod_name: name of the pod
-        namespace: namespace of the pod
-        tail_lines: number of log lines to fetch
-    
+        pod_name: real pod name (e.g. "data-processor-7b8f9").
+        namespace: kubernetes namespace (default: "default").
+        tail_lines: how many recent log lines to analyze (default: 100).
+
     Returns:
-        {"summary": str, "anomalies": [...], "raw_tail": str}
+        {"summary": str, "anomalies": [str, ...], "raw_tail": str}
     """
     result = _kubectl_exec_impl(f"logs {pod_name}", namespace)
     logs = result.get("output", "")
@@ -178,15 +187,16 @@ def analyze_logs(pod_name: str, namespace: str = "default", tail_lines: int = 10
 
 @tool
 def validate_manifest(yaml_content: str, dry_run: bool = True) -> dict:
-    """
-    Validate a Kubernetes manifest YAML.
-    
+    """Validate a Kubernetes manifest YAML string.
+
+    Checks for missing metadata, resource limits, and image specs.
+
     Args:
-        yaml_content: YAML as string
-        dry_run: if True, don't apply, just validate
-    
+        yaml_content: the raw YAML string of the manifest.
+        dry_run: if True, only validate — do not apply (default: True).
+
     Returns:
-        {"valid": bool, "issues": [...]}
+        {"valid": bool, "issues": ["...", ...]}
     """
     issues = []
     
@@ -225,56 +235,56 @@ def validate_manifest(yaml_content: str, dry_run: bool = True) -> dict:
 
 @tool
 def retrieve_docs(query: str, top_k: int = 5, source_type: Optional[str] = None) -> dict:
-    """
-    Query the RAG vector store for relevant documentation.
-    
+    """Search the RAG vector store for runbooks, events, and manifests.
+
+    Use this to find documentation about failure patterns (e.g.
+    "OOMKilled memory limit", "CrashLoopBackOff troubleshooting").
+
     Args:
-        query: search query (e.g., "pod Ooomkilled")
-        top_k: number of results
-        source_type: filter by "runbook", "event", "manifest", or None for all
-    
+        query: natural-language search query.
+        top_k: max results to return (default: 5).
+        source_type: optional filter — "runbook", "event", "manifest",
+                     or None for all types.
+
     Returns:
-        {"results": [{"content": str, "source": str, "score": float}]}
+        {"results": [{"content": str, "source": str, "doc_type": str}],
+         "count": int}
     """
     try:
         store = MilvusStore()
         docs = store.search(query, k=top_k)
-        
+
         results = []
         for doc in docs:
-            result = {
+            results.append({
                 "content": doc.page_content[:500],
                 "source": doc.metadata.get("source", "unknown"),
                 "doc_type": doc.metadata.get("doc_type", "unknown"),
-            }
-            results.append(result)
-        
+            })
+
         return {"results": results, "count": len(results)}
     except Exception as e:
-        logger.error("RAG retrieval failed: %s", e)
-        return {"results": [], "count": 0, "error": str(e)}
+        logger.error("RAG retrieval failed (Milvus may be unavailable): %s", e)
+        return {"results": [], "count": 0, "error": f"Vector store unavailable: {e}"}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Root Cause Hypothesis Tool
 # ─────────────────────────────────────────────────────────────────────────────
 
-class Hypothesis(BaseModel):
-    cause: str
-    confidence: float
-    tests: list[str]
-
-
 @tool
 def generate_hypotheses(symptoms: str) -> dict:
-    """
-    Generate ranked root cause hypotheses based on symptoms.
-    
+    """Generate ranked root-cause hypotheses from a symptom description.
+
+    Call this AFTER gathering evidence (logs, events). Pass a plain-text
+    summary of symptoms, e.g. "Pod crashing, OOMKilled, high memory".
+
     Args:
-        symptoms: description of failures (e.g., "Pod crashing, high memory use")
-    
+        symptoms: plain-text description of observed problems.
+
     Returns:
-        {"hypotheses": [{"cause": str, "confidence": float, "tests": [...]}]}
+        {"hypotheses": [{"cause": str, "confidence": float,
+                         "tests": [str, ...]}]}
     """
     # Simple rule-based hypothesis generator
     hypotheses = []
@@ -344,15 +354,18 @@ def generate_hypotheses(symptoms: str) -> dict:
 
 @tool
 def generate_fix(hypothesis: str, manifest_yaml: Optional[str] = None) -> dict:
-    """
-    Generate remediation steps and patches.
-    
+    """Generate remediation commands and patches for a root cause.
+
+    Pass the "cause" string from generate_hypotheses output.
+
     Args:
-        hypothesis: the root cause (from generate_hypotheses)
-        manifest_yaml: current deployment manifest (optional)
-    
+        hypothesis: the root-cause string, e.g.
+            "Out-of-Memory (OOMKilled): Pod memory request too low".
+        manifest_yaml: optional current deployment manifest YAML string.
+
     Returns:
-        {"patches": [...], "commands": [...], "risk_score": float, "explanation": str}
+        {"patches": [dict], "commands": [str], "risk_score": float,
+         "explanation": str}
     """
     commands = []
     patches = []
@@ -406,15 +419,18 @@ def generate_fix(hypothesis: str, manifest_yaml: Optional[str] = None) -> dict:
 
 @tool
 def verify_fix(fix_commands: list[str], cluster_health_check: str = "cluster healthy") -> dict:
-    """
-    Evaluate if a fix is likely to succeed.
-    
+    """Evaluate whether proposed fix commands are likely to succeed.
+
+    Pass the "commands" list from generate_fix output.
+
     Args:
-        fix_commands: list of commands to be executed
-        cluster_health_check: description of current cluster state
-    
+        fix_commands: list of kubectl / remediation commands.
+        cluster_health_check: brief description of current cluster state
+            (default: "cluster healthy").
+
     Returns:
-        {"likely_effective": bool, "missing_steps": [...], "risks": [...]}
+        {"likely_effective": bool, "missing_steps": [str],
+         "risks": [str], "recommendation": str}
     """
     risks = []
     missing_steps = []

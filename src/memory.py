@@ -1,6 +1,7 @@
 """Per-session conversation memory with LRU eviction and optional disk persistence."""
 
-import json, logging
+import json
+import logging
 from collections import OrderedDict
 from pathlib import Path
 from typing import Optional

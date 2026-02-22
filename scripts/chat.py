@@ -17,9 +17,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from rich.console import Console
-from rich.panel import Panel
-from rich.table import Table
+from rich.console import Console  # noqa: E402
+from rich.panel import Panel  # noqa: E402
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
 # Suppress noisy async Milvus warning (we only use sync)

@@ -1,6 +1,7 @@
 """Unified document ingestion — auto-detects file type, chunks, adds metadata."""
 
-import json, logging
+import json
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 

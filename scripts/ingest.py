@@ -15,12 +15,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from rich.console import Console
-from rich.table import Table
+from rich.console import Console  # noqa: E402
+from rich.table import Table  # noqa: E402
 
-from src.config import get_settings
-from src.ingestion import ingest_directory, ingest_file
-from src.vectorstore import MilvusStore
+from src.ingestion import ingest_directory, ingest_file  # noqa: E402
+from src.vectorstore import MilvusStore  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)

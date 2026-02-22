@@ -38,6 +38,8 @@ def rerank(docs: list[Document], query: str, top_k: int = 4) -> list[Document]:
 
 
 class MilvusStore:
+    """Lazy-initialized synchronous Milvus vector store with graceful fallback."""
+
     def __init__(self, drop_old=False):
         self._settings = get_settings()
         self._drop_old = drop_old
@@ -46,11 +48,19 @@ class MilvusStore:
     def _get_vs(self):
         if self._vs is None:
             s = self._settings
-            self._vs = Milvus(
-                embedding_function=get_embeddings(),
-                collection_name=s.milvus_collection,
-                connection_args={"uri": s.milvus_uri},
-                drop_old=self._drop_old, auto_id=True)
+            try:
+                self._vs = Milvus(
+                    embedding_function=get_embeddings(),
+                    collection_name=s.milvus_collection,
+                    connection_args={"uri": s.milvus_uri},
+                    drop_old=self._drop_old, auto_id=True)
+            except Exception:
+                logger.warning(
+                    "Milvus connection failed (uri=%s). "
+                    "Vector search will return empty results.",
+                    s.milvus_uri,
+                )
+                raise
         return self._vs
 
     def add_documents(self, docs: list[Document]) -> list[str]:
@@ -59,7 +69,11 @@ class MilvusStore:
 
     def search(self, query: str, k: int | None = None) -> list[Document]:
         k = k or self._settings.retrieval_top_k
-        docs = self._get_vs().similarity_search(query, k=min(k * 3, 20))
+        try:
+            docs = self._get_vs().similarity_search(query, k=min(k * 3, 20))
+        except Exception:
+            logger.warning("Milvus search failed — returning empty results.")
+            return []
         return rerank(docs, query, top_k=k)
 
     def health_check(self) -> bool:

@@ -1,6 +1,8 @@
 """FastAPI server for K8s Failure Intelligence Copilot."""
 
-import json, logging, sys
+import json
+import logging
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
@@ -9,17 +11,17 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from fastapi import FastAPI, HTTPException, Request, status
-from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
-from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel, Field
+from fastapi import FastAPI, HTTPException, Request  # noqa: E402
+from fastapi.concurrency import run_in_threadpool  # noqa: E402
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse  # noqa: E402
+from fastapi.staticfiles import StaticFiles  # noqa: E402
+from fastapi.templating import Jinja2Templates  # noqa: E402
+from pydantic import BaseModel, Field  # noqa: E402
 
-from src.config import get_settings
-from src.rag_chain import RAGChain, FailureDiagnosis, estimate_complexity
-from src.ingestion import ingest_file, ingest_directory
-from src.vectorstore import MilvusStore
+from src.config import get_settings  # noqa: E402
+from src.rag_chain import RAGChain, FailureDiagnosis, estimate_complexity  # noqa: E402
+from src.ingestion import ingest_file, ingest_directory  # noqa: E402
+from src.vectorstore import MilvusStore  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -170,31 +172,22 @@ async def clear_memory(request: Request):
 
 class AgentRequest(BaseModel):
     query: str = Field(..., min_length=1)
-    max_steps: int = Field(default=10, ge=1, le=20)
-
-_agent_instance = None
-
-def _get_agent():
-    global _agent_instance
-    if _agent_instance is None:
-        from src.agents import create_investigator_agent
-        _agent_instance = create_investigator_agent()
-    return _agent_instance
+    max_steps: int = Field(default=6, ge=1, le=20)
 
 
 @app.post("/agent/invoke")
 async def agent_invoke(request: AgentRequest):
-    """Run the agent and return response + step trace."""
+    """Run the investigator agent and return response + step trace."""
     try:
-        agent = _get_agent()
-        # Import here to avoid circular
-        sys.path.insert(0, str(ROOT / "scripts"))
-        from agent import run_agent_with_tools
-        response, steps = await run_in_threadpool(
-            run_agent_with_tools, agent, request.query,
-            request.max_steps, False  # verbose=False for API
+        from src.agents import diagnose as agent_diagnose
+
+        result = await run_in_threadpool(
+            agent_diagnose, request.query, request.max_steps
         )
-        return {"response": response, "steps": steps}
+        return {
+            "response": result.get("response", ""),
+            "steps": result.get("steps", []),
+        }
     except Exception as e:
         logger.error("Agent invoke failed: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
@@ -205,7 +198,3 @@ async def agent_ui(request: Request):
     """Agent chat UI with step trace viewer."""
     return templates.TemplateResponse("agent.html", {"request": request})
 
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")

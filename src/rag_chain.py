@@ -1,10 +1,11 @@
 """RAG diagnosis chain — retrieval + adaptive model selection + generation."""
 
-import json, logging, os, re
+import json
+import logging
+import os
+import re
 from typing import Optional
 
-from langchain_core.documents import Document
-from langchain_core.messages import BaseMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_ollama import ChatOllama
 from pydantic import BaseModel, Field
