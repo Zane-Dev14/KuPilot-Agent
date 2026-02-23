@@ -193,6 +193,86 @@ async def agent_invoke(request: AgentRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/agent/diagnose")
+async def agent_diagnose_orchestrator(request: AgentRequest):
+    """Run the multi-agent orchestrator and return structured diagnosis.
+    
+    This endpoint uses the orchestrator agent which coordinates:
+    - Investigator: root cause analysis
+    - Knowledge: runbook/documentation retrieval
+    - Remediation: fix generation and execution
+    - Verification: safety assessment
+    
+    Returns structured diagnosis with root cause, evidence, fix applied, and verification.
+    """
+    try:
+        from src.agents import create_orchestrator_agent
+        from scripts.agent import run_agent_with_tools
+        
+        # Create orchestrator with all subagents
+        orchestrator = await run_in_threadpool(create_orchestrator_agent)
+        
+        # Run orchestrator with tool execution loop
+        response, steps = await run_in_threadpool(
+            run_agent_with_tools,
+            orchestrator,
+            request.query,
+            max_steps=request.max_steps,
+            verbose=False
+        )
+        
+        # Parse response to extract structured components
+        # (orchestrator should output structured format per prompt)
+        result = {
+            "type": "diagnosis",
+            "response": response,
+            "steps": steps,
+            "query": request.query,
+        }
+        
+        # Try to parse structured fields from response
+        # Look for sections like "Root Cause:", "Evidence:", "Fix Applied:", etc.
+        if response:
+            sections = {}
+            current_section = None
+            lines = response.split("\n")
+            for line in lines:
+                if line.startswith("**Root Cause:**"):
+                    current_section = "root_cause"
+                    sections[current_section] = line.replace("**Root Cause:**", "").strip()
+                elif line.startswith("**Evidence:**"):
+                    current_section = "evidence"
+                    sections[current_section] = []
+                elif line.startswith("**Relevant Documentation:**"):
+                    current_section = "documentation"
+                    sections[current_section] = []
+                elif line.startswith("**Fix Applied:**"):
+                    current_section = "fix"
+                    sections[current_section] = []
+                elif line.startswith("**Verification:**"):
+                    current_section = "verification"
+                    sections[current_section] = []
+                elif line.startswith("**Next Steps:**"):
+                    current_section = "next_steps"
+                    sections[current_section] = []
+                elif line.startswith("**Confidence:**"):
+                    sections["confidence"] = line.replace("**Confidence:**", "").strip()
+                    current_section = None
+                elif current_section and line.strip():
+                    if isinstance(sections.get(current_section), list):
+                        sections[current_section].append(line.strip())
+                    elif current_section in sections:
+                        sections[current_section] += " " + line.strip()
+            
+            result.update(sections)
+        
+        return result
+        
+    except Exception as e:
+        logger.error("Orchestrator diagnose failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/agent", response_class=HTMLResponse)
 async def agent_ui(request: Request):
     """Agent chat UI with step trace viewer."""

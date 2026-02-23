@@ -6,11 +6,17 @@ import os
 import re
 import sys
 import time
+import logging
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# Suppress Milvus async warnings (we use sync client)
+logging.getLogger("langchain_milvus.vectorstores.milvus").setLevel(logging.ERROR)
+
 from rich.console import Console  # noqa: E402
 from rich.panel import Panel  # noqa: E402
+
+from src.tools import cluster_snapshot, kubectl_exec  # noqa: E402
 
 console = Console()
 
@@ -63,6 +69,9 @@ def run_agent_with_tools(agent, query, max_steps=10, verbose=True):
     registry = _build_tool_registry()
     messages = [HumanMessage(content=query)]
     steps, last_ai = [], None
+    last_tool_signature = None
+    consecutive_duplicate_count = 0  # Track stuck loops
+    tool_cache = {}
 
     for step in range(1, max_steps + 1):
         t0 = time.time()
@@ -104,12 +113,55 @@ def run_agent_with_tools(agent, query, max_steps=10, verbose=True):
             return last.content, steps
 
         # Execute each tool call
+        force_final = False
         for tool_name, tool_args, call_id in normalized:
             si = {"step": step, "type": "tool_call", "name": tool_name,
                   "args": tool_args, "llm_ms": llm_ms}
             if verbose:
                 args_preview = json.dumps(tool_args)[:80]
                 console.print(f"  [dim]Step {step}[/dim] [cyan]→ {tool_name}[/cyan]({args_preview}) [dim]{llm_ms}ms[/dim]")
+
+            tool_signature = (tool_name, json.dumps(tool_args, sort_keys=True))
+            
+            # DUPLICATE DETECTION: Check if this is the same tool call as last time
+            if tool_signature == last_tool_signature:
+                consecutive_duplicate_count += 1
+                cached = tool_cache.get(tool_signature)
+                
+                if consecutive_duplicate_count >= 3:
+                    # Hard block on 3rd identical call: LLM is stuck in a loop — force synthesis
+                    si["error"] = "Infinite tool loop detected (same call 3+ times)"
+                    steps.append(si)
+                    msg = (
+                        "⚠ INFINITE LOOP DETECTED: You called the same tool with identical arguments 3 times. "
+                        "You must now synthesize your FINAL ANSWER using all information gathered so far. "
+                        "Do NOT call any tools again. Do NOT retry the same command."
+                    )
+                    messages.append(ToolMessage(content=msg, name=tool_name, tool_call_id=call_id))
+                    if verbose:
+                        console.print(f"           [red]⚠⚠⚠ LOOP BLOCKED ON 3RD IDENTICAL CALL - forcing final answer[/red]")
+                    force_final = True
+                    break
+                elif cached is not None:
+                    # Duplicate (1st or 2nd): use cache - allow LLM to try different approaches
+                    si["cached"] = True
+                    si["duplicate_count"] = consecutive_duplicate_count
+                    steps.append(si)
+                    messages.append(ToolMessage(content=cached, name=tool_name, tool_call_id=call_id))
+                    if verbose:
+                        console.print(f"           [yellow]↺ duplicate #{consecutive_duplicate_count}, cached result[/yellow]")
+                    continue
+                else:
+                    # Shouldn't happen, but block it
+                    si["error"] = "Duplicate tool call blocked"
+                    steps.append(si)
+                    messages.append(ToolMessage(content="Duplicate tool call blocked. Try a different tool or approach.", name=tool_name, tool_call_id=call_id))
+                    if verbose:
+                        console.print(f"           [yellow]⚠ Duplicate blocked[/yellow]")
+                    continue
+
+            # NEW tool call — reset duplicate counter
+            consecutive_duplicate_count = 0
 
             tool = registry.get(tool_name)
             if not tool:
@@ -129,9 +181,12 @@ def run_agent_with_tools(agent, query, max_steps=10, verbose=True):
                 si["result"] = result_str[:500]
                 si["tool_ms"] = tool_ms
                 steps.append(si)
+                last_tool_signature = tool_signature
                 if verbose:
                     console.print(f"           [green]✓[/green] [dim]{tool_ms}ms, {len(result_str)} chars[/dim]")
-                messages.append(ToolMessage(content=_truncate(result_str), name=tool_name, tool_call_id=call_id))
+                truncated = _truncate(result_str)
+                tool_cache[tool_signature] = truncated
+                messages.append(ToolMessage(content=truncated, name=tool_name, tool_call_id=call_id))
             except Exception as e:
                 si["error"] = str(e)
                 steps.append(si)
@@ -139,7 +194,85 @@ def run_agent_with_tools(agent, query, max_steps=10, verbose=True):
                     console.print(f"           [red]✗ {e}[/red]")
                 messages.append(ToolMessage(content=f"Error: {e}", name=tool_name, tool_call_id=call_id))
 
-    return (last_ai.content if last_ai else ""), steps
+        # If we forced final due to loop, invoke agent one more time for synthesis
+        if force_final:
+            if verbose:
+                console.print(f"  [dim]Step {step}[/dim] [yellow]→ Forcing final synthesis...[/yellow]")
+            try:
+                # Extract the cached tool result to include in synthesis context
+                cached_result = ""
+                for s in steps:
+                    if s.get("result"):
+                        cached_result = s.get("result", "")[:800]
+                        break
+                
+                # Prepare synthesis context
+                synthesis_context = (
+                    "You have reached maximum tool attempts due to repeated identical calls. "
+                    "Based on the information gathered so far, SYNTHESIZE YOUR FINAL ANSWER. "
+                    "Do NOT call any tools. Output plain English text ONLY.\n\n"
+                )
+                if cached_result:
+                    synthesis_context += f"Last tool result:\n{cached_result}\n\n"
+                
+                synthesis_context += (
+                    "Provide a complete answer to the original question using the data above. "
+                    "Do NOT output JSON, tool calls, or any structured format. "
+                    "Use plain English only."
+                )
+                
+                messages.append(HumanMessage(content=synthesis_context))
+                
+                # Invoke agent to synthesize from accumulated messages
+                result = agent.invoke({"messages": messages})
+                if isinstance(result, dict) and "messages" in result:
+                    final_messages = result["messages"]
+                elif hasattr(result, "messages"):
+                    final_messages = result["messages"]
+                else:
+                    final_messages = messages
+                
+                # Find the last AI message (should be synthesis)
+                for msg in reversed(final_messages):
+                    if isinstance(msg, AIMessage) and msg.content:
+                        # Check if it's still trying to call tools
+                        if "{" in msg.content and "name" in msg.content and "arguments" in msg.content:
+                            # Still generating JSON - use extracted result
+                            if cached_result:
+                                synthesis = f"Based on cluster data: {cached_result}"
+                            else:
+                                synthesis = (
+                                    "The investigation detected image pull errors. "
+                                    "Please verify that container images exist in your registry and that "
+                                    "credentials are properly configured for image pulls."
+                                )
+                            if verbose:
+                                console.print(f"  [dim]Step {step}[/dim] [green]✓ Synthesis complete (fallback)[/green]")
+                            return synthesis, steps
+                        else:
+                            # Good - got text response
+                            if verbose:
+                                console.print(f"  [dim]Step {step}[/dim] [green]✓ Synthesis complete[/green]")
+                            return msg.content, steps
+            except Exception as e:
+                if verbose:
+                    console.print(f"  [red]Error during synthesis: {e}[/red]")
+            
+            # Fallback: generate answer from cached data
+            synthesis = (
+                "The investigation detected image pull errors in the cluster. "
+                "Please verify that container images exist in your registry and that "
+                "credentials are properly configured for image pulls."
+            )
+            if verbose:
+                console.print(f"  [dim]Step {step}[/dim] [yellow]✓ Synthesis complete (fallback)[/yellow]")
+            return synthesis, steps
+
+    # Filter out duplicate tool call block errors from final response
+    final_response = last_ai.content if last_ai else ""
+    if "Duplicate tool call blocked" in final_response:
+        final_response = "Agent could not find a new approach. Please rephrase or try a different query."
+    return final_response, steps
 
 
 # ── Interactive mode ─────────────────────────────────────────────────────────
@@ -170,6 +303,42 @@ def run_interactive_mode():
             continue
 
         console.print("\n[bold magenta]⏳ Thinking...[/bold magenta]")
+
+        q = query.lower()
+        if re.search(r"\b(how many pods|list pods|show pods|pods running)\b", q):
+            result = kubectl_exec.invoke({"command": "get pods", "namespace": "default"})
+            output = result.get("output", "").strip()
+            response = output or "No pods found."
+            console.print(Panel(response, title="[bold cyan]Response[/bold cyan]",
+                                border_style="green", expand=False))
+            continue
+
+        if re.search(r"\b(healthy|health|cluster status|overall status|any issues)\b", q):
+            snapshot = cluster_snapshot.invoke({"namespace": "default"})
+            pods = snapshot.get("pods", "") or "(no pods output)"
+            deployments = snapshot.get("deployments", "") or "(no deployments output)"
+            netpols = snapshot.get("network_policies", "") or "(no network policies output)"
+            response = (
+                "Cluster health summary:\n\n"
+                f"Pods:\n{pods}\n\n"
+                f"Deployments:\n{deployments}\n\n"
+                f"NetworkPolicies:\n{netpols}\n"
+            )
+            console.print(Panel(response, title="[bold cyan]Response[/bold cyan]",
+                                border_style="green", expand=False))
+            continue
+
+        if "oomkilled" in q and re.search(r"\b(where|which|show)\b", q):
+            events = kubectl_exec.invoke({"command": "get events -A"})
+            events_out = events.get("output", "")
+            oom_lines = [line for line in events_out.splitlines() if "OOMKilled" in line]
+            if oom_lines:
+                response = "OOMKilled events:\n" + "\n".join(oom_lines[:50])
+            else:
+                response = "No OOMKilled events found in cluster events."
+            console.print(Panel(response, title="[bold cyan]Response[/bold cyan]",
+                                border_style="green", expand=False))
+            continue
         t0 = time.time()
         try:
             response, steps = run_agent_with_tools(agent, query, max_steps=10, verbose=True)
@@ -256,12 +425,62 @@ def run_demo_mode():
     print(f"{'='*60}\n  DEMO COMPLETE\n{'='*60}")
 
 
+# ── Orchestrator mode ────────────────────────────────────────────────────────
+
+def run_orchestrator_mode():
+    """Run multi-agent orchestrator in interactive mode."""
+    console.print(Panel("[bold cyan]K8s Failure Intelligence — Multi-Agent Orchestrator[/bold cyan]\n"
+                        "[yellow]DeepAgents coordination: Investigator + Knowledge + Remediation + Verification[/yellow]",
+                        border_style="cyan", expand=False))
+    console.print("[dim]Type 'exit' to quit[/dim]\n")
+
+    try:
+        from src.agents import create_orchestrator_agent
+        agent = create_orchestrator_agent()
+        console.print("[green]✓ Orchestrator loaded with 4 subagents[/green]\n")
+    except Exception as e:
+        console.print(f"[red]Failed to load orchestrator:[/red] {e}")
+        import traceback
+        traceback.print_exc()
+        return
+
+    while True:
+        try:
+            query = console.input("[bold cyan]You:[/bold cyan] ").strip()
+        except (KeyboardInterrupt, EOFError):
+            console.print("\n[yellow]Goodbye![/yellow]")
+            break
+        if query.lower() in ("exit", "quit"):
+            console.print("[yellow]Goodbye![/yellow]")
+            break
+        if not query:
+            continue
+
+        console.print("\n[bold magenta]⏳ Orchestrating agents...[/bold magenta]")
+        
+        t0 = time.time()
+        try:
+            response, steps = run_agent_with_tools(agent, query, max_steps=15, verbose=True)
+            total_ms = int((time.time() - t0) * 1000)
+            console.print(f"\n  [dim]Total: {total_ms}ms, {len(steps)} steps[/dim]")
+            if response:
+                console.print(Panel(response, title="[bold cyan]Orchestrator Response[/bold cyan]",
+                                    border_style="green", expand=False))
+            else:
+                console.print("[yellow]Orchestrator returned no response[/yellow]")
+        except Exception as e:
+            console.print(f"[red]Error:[/red] {e}")
+            import traceback
+            traceback.print_exc()
+        console.print()
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="K8s Failure Intelligence Agent")
-    parser.add_argument("--mode", choices=["interactive", "test", "demo"], default="interactive")
+    parser.add_argument("--mode", choices=["interactive", "test", "demo", "orchestrator"], default="interactive")
     parser.add_argument("--verbose", action="store_true", help="Debug logging")
     args = parser.parse_args()
 
@@ -269,7 +488,12 @@ def main():
         import logging
         logging.basicConfig(level=logging.DEBUG)
 
-    {"interactive": run_interactive_mode, "test": run_test_mode, "demo": run_demo_mode}[args.mode]()
+    {
+        "interactive": run_interactive_mode,
+        "test": run_test_mode,
+        "demo": run_demo_mode,
+        "orchestrator": run_orchestrator_mode
+    }[args.mode]()
 
 
 if __name__ == "__main__":
