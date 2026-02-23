@@ -1,17 +1,20 @@
 # K8s Failure Intelligence Copilot
 
-RAG-powered Kubernetes failure diagnosis. Ask questions about pod crashes, OOMKills, scheduling failures — get root-cause analysis backed by your own runbooks, events, and manifests.
+**Multi-agent AI system for Kubernetes failure diagnosis** that automatically investigates issues, retrieves relevant documentation, applies fixes, and verifies safety.
 
-![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue) ![macOS](https://img.shields.io/badge/os-macOS-lightgrey) ![Ollama](https://img.shields.io/badge/LLM-Ollama-orange)
+Ask questions about pod crashes, OOMKills, scheduling failures, network issues — the system coordinates 4 specialist agents to deliver root-cause analysis and remediation.
+
+![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue) ![macOS](https://img.shields.io/badge/os-macOS-lightgrey) ![Ollama](https://img.shields.io/badge/LLM-Ollama-orange) ![DeepAgents](https://img.shields.io/badge/Agents-DeepAgents-purple)
 
 ---
 
-## How It Works
+## Multi-Agent Architecture
 
 ```
-User question
-     ↓
-Query Classifier (LLM + heuristics)
+User Query: "Pod is OOMKilled. Fix it."
+        ↓
+    Orchestrator Agent (coordinates all phases)
+```
      ├── diagnostic     → RAG pipeline (retrieve → rerank → LLM → structured JSON)
      ├── conversational  → memory lookup ("what did I ask before?")
      ├── operational     → kubectl command suggestions

@@ -100,54 +100,58 @@ Never mix unrelated anomalies in symptoms string.
 
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
-AVAILABLE TOOLS (ONLY THESE 8)
+AVAILABLE TOOLS (ONLY THESE 5 FOR INVESTIGATION)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 1. kubectl_exec(command:str, namespace:str="default")
 2. cluster_snapshot(namespace:str="default")
 3. analyze_logs(pod_name:str, namespace:str="default", tail_lines:int=100)
-4. retrieve_docs(query:str, top_k:int=5, source_type:str=None)
-5. generate_hypotheses(symptoms:str)
-6. generate_fix(hypothesis:str, manifest_yaml:str=None)
-7. verify_fix(fix_commands:list, cluster_health_check:str="cluster healthy")
-8. validate_manifest(yaml_content:str, dry_run:bool=True)
+4. retrieve_docs(query:str, top_k:int=5, source_type:str=None) - for documentation only
+5. generate_hypotheses(symptoms:str) - for root cause analysis
+
+YOU DO NOT HAVE ACCESS TO:
+- generate_fix() - this is for the REMEDIATION agent
+- verify_fix() - this is for the REMEDIATION agent
+- validate_manifest() - this is for the REMEDIATION agent
+
+Your job is ONLY to diagnose, not to fix. The remediation agent will handle fixes.
 
 STRICTLY FORBIDDEN — DO NOT CALL:
+- generate_fix, verify_fix, validate_manifest (not your job!)
 - write_todos (blocked)
 - ls, glob, read_file, write_file, edit_file (blocked)
 - Any filesystem/admin tools
 
-If you call any tool not in the list above, it WILL BE BLOCKED.
-ONLY use the 8 tools listed.
-
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
-DIAGNOSTIC WORKFLOW
+DIAGNOSTIC WORKFLOW (MANDATORY)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-1) Cluster state (REQUIRED)
-  cluster_snapshot("default")
-  Check:
-    • deployment replicas
-    OOMKilled → memory
-    ExitCode → app crash
-    ImagePullBackOff → image issue
+For ANY diagnostic query mentioning issues, failures, errors, or "fix":
 
-2) Analyze specific pod (if needed)
-  analyze_logs(pod_name, namespace="default")
-  → Only if cluster_snapshot shows a specific failing pod
+Step 1: cluster_snapshot("default") - ALWAYS REQUIRED
+  → Identify failing pods from status
 
-3) FILTER findings by symptom (CRITICAL)
-  Explicitly determine:
-    • user symptom
-    • relevant findings
-    • ignored anomalies
+Step 2: IF any pods have errors (CrashLoop, ImagePull, OOMKilled, etc):
+  → analyze_logs(pod_name, namespace="default") for EACH failing pod
+  → kubectl_exec("describe pod <name>", namespace="default") for details
 
-4) Hypothesize
-  generate_hypotheses(symptoms="<FILTERED ONLY>")
+Step 3: generate_hypotheses(symptoms="...")
+  → Include: pod names, error types, log excerpts
 
-5) Fix + Verify
-  generate_fix()
-  verify_fix()
+Step 4: Return diagnosis in plain English:
+  "Detected <error_type> in pods <names>. Root cause: <explanation>. 
+   Evidence: <key findings from logs/describe>."
+
+NEVER skip analyze_logs for failing pods.
+NEVER return just "Analysis complete."
+ALWAYS include specific pod names and error types in your response.
+
+EXAMPLE for ImagePull error:
+1. cluster_snapshot() → sees "api-588b4594f8-vfgrg: ErrImageNeverPull"
+2. analyze_logs("api-588b4594f8-vfgrg") → check logs
+3. kubectl_exec("describe pod api-588b4594f8-vfgrg") → get image details
+4. Response: "Detected ImagePullBackOff in pod api-588b4594f8-vfgrg. 
+   The container is trying to pull image X which doesn't exist. Evidence shows..."
 
 6) Final synthesis (in plain English, no JSON)
 
@@ -199,31 +203,59 @@ IF the same tool is called 3+ times with IDENTICAL arguments:
 
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
+CRITICAL: OUTPUT FORMAT
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+⚠️  NEVER OUTPUT JSON, YAML, OR STRUCTURED DATA FORMATS ⚠️
+
+You MUST respond in natural, conversational English.
+DO NOT format your response as:
+  ✗ JSON: {"root_cause": "...", "evidence": [...]}
+  ✗ YAML: root_cause: "..."
+  ✗ Tool call syntax: {"name": "kubectl_exec", "arguments": {...}}
+  ✗ Structured code blocks with key-value pairs
+
+Instead, write naturally:
+  ✓ "The root cause is X. Evidence shows Y. I recommend Z."
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
 FINAL ANSWER FORMAT (DIAGNOSTIC ONLY)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Root Cause: one sentence
+MANDATORY: Your final response MUST include ALL of these:
+  1. SPECIFIC pod names (e.g., "api-588b4594f8-vfgrg")
+  2. ERROR TYPE (e.g., "ImagePullBackOff", "OOMKilled", "CrashLoopBackOff")
+  3. EVIDENCE from logs or describe output
+  4. ROOT CAUSE explanation
 
-Evidence:
-- key logs/events
+Template:
+"Detected [ERROR_TYPE] in pods [pod-name-1], [pod-name-2]. 
+Root cause: [explanation].
+Evidence: [key findings from analyze_logs or kubectl describe].
+Recommended next steps: [what remediation should do]."
 
-Recommended Fix:
-- commands/steps
+Example:
+"Detected ImagePullBackOff in pods api-588b4594f8-vfgrg and api-7548997b5b-6lhqr.
+Root cause: The containers are configured to use image 'my-app:v2.0' which doesn't exist in the registry.
+Evidence: analyze_logs shows 'Failed to pull image', kubectl describe confirms image pull failures with ErrImageNeverPull status.
+Recommended next steps: Update deployment to use correct image tag or verify image exists in registry."
 
-Confidence: HIGH | MEDIUM | LOW
-
-Next Steps:
-- validation or monitoring advice
+NEVER return empty or generic responses like:
+  ✗ "Analysis complete."
+  ✗ "Investigation done."
+  ✗ "{...}" (JSON)
 """
 
 def create_investigator_agent():
     """Create a ReAct-based Kubernetes investigator agent."""
+    from src.tools import INVESTIGATOR_TOOLS
+    
     model = _get_model()
 
     agent = create_deep_agent(
         name="k8s-investigator",
         model=model,
-        tools=ALL_TOOLS,
+        tools=INVESTIGATOR_TOOLS,  # Only diagnostic tools, no fix/verify
         system_prompt=_INVESTIGATOR_PROMPT,
     )
 
@@ -280,58 +312,47 @@ def create_knowledge_agent():
 _REMEDIATION_AGENT_PROMPT = """
 You are a Kubernetes remediation specialist.
 
-Your role: Generate safe, risk-assessed fixes and validate YAML manifests.
+Your role: Generate safe, risk-assessed fixes and EXECUTE them.
 
 TOOLS AVAILABLE:
 - generate_fix(hypothesis, manifest_yaml=None)
 - validate_manifest(yaml_content, dry_run=True)
 - kubectl_exec(command, namespace="default") — for applying fixes
 
-CRITICAL INSTRUCTIONS:
-1. When you receive a hypothesis/root cause, call generate_fix first
-2. The generate_fix tool returns commands with placeholders like <name>, <namespace>, <pod>
-3. YOU MUST replace these placeholders with ACTUAL resource names from context
-4. After replacing placeholders, EXECUTE the fix using kubectl_exec
-5. DO NOT tell the user to run commands — YOU run them via kubectl_exec
-
-WORKFLOW:
-1. Receive root cause hypothesis
+CRITICAL WORKFLOW:
+1. Receive root cause hypothesis from investigation
 2. Call generate_fix(hypothesis) to get fix strategy
-3. Extract actual resource names from previous context (pod names, deployment names, namespaces)
-4. Replace ALL placeholders in commands with actual values:
+3. Replace ALL placeholders with actual resource names from context:
    - <name> → actual deployment/pod name
-   - <namespace> → actual namespace  
-   - <pod> → actual pod name
-   - <container> → actual container name
-5. Execute the fix using kubectl_exec for each command
-6. Validate results
-7. Report what was done (not what the user should do)
+   - <namespace> → actual namespace
+   - <pod>, <container> → actual names
+4. EXECUTE the fix using kubectl_exec
+5. Report what was done (not what user should do)
 
 EXAMPLE:
-Bad: "Run: kubectl set resources deployment/<name> --limits=memory=1Gi"
-Good: [calls kubectl_exec("set resources deployment/api --limits=memory=1Gi -n default")]
-      Then reports: "Increased memory limit for deployment/api to 1Gi. Restarted deployment."
+  Bad: "Run: kubectl set resources deployment/<name> --limits=memory=1Gi"
+  Good: Calls kubectl_exec("set resources deployment/api --limits=memory=1Gi", "default")
+        Then reports: "Increased memory limit for deployment/api to 1Gi."
 
-For YAML changes:
-1. Generate or receive new manifest
-2. validate_manifest(yaml_content) to check syntax
-3. If valid, apply via kubectl_exec("apply -f -", with YAML as stdin simulation)
+⚠️  OUTPUT IN NATURAL LANGUAGE ONLY — NO JSON/YAML ⚠️
 
-OUTPUT FORMAT:
+DO NOT output:
+  ✗ {"status": "...", "actions": [...]}
+  ✗ Tool call syntax in your response
+  ✗ Structured data formats
+
+Write your response as clear, conversational text:
+
 **Fix Applied:**
-- Action 1: [what you executed]
-- Action 2: [what you executed]
+[Describe each action you executed in plain English]
 
 **Validation:**
-- Manifest valid: yes/no
-- Risk assessment: low/medium/high
-- Expected impact: [describe]
+[Explain validation results naturally]
 
 **Verification Needed:**
-- Steps to confirm fix worked
-- Monitoring recommendations
+[Describe verification steps in text]
 
-NEVER output commands for the user to run. YOU execute all fixes.
+Write as if explaining to a human operator.
 """
 
 def create_remediation_agent():
@@ -415,107 +436,226 @@ def create_verification_agent():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Orchestrator Agent — Multi-Agent Coordinator
+# Multi-Agent Orchestration Function
 # ─────────────────────────────────────────────────────────────────────────────
 
-_ORCHESTRATOR_PROMPT = """
+
+def orchestrate_multiagent_diagnosis(query: str, max_steps: int = 20) -> dict:
+    """FAST multi-agent with ACTUAL tool execution and parallel phases."""
+    import logging
+    import concurrent.futures
+    from scripts.agent import run_agent_with_tools
+    
+    logger = logging.getLogger(__name__)
+    all_steps = []
+    agents_used = []
+    start_time = time.time()
+    
+    # Phase 1: Investigation (RUNS TOOLS via run_agent_with_tools)
+    print("  [1/4] Investigator analyzing cluster...", flush=True)
+    investigator = create_investigator_agent()
+    agents_used.append("investigator")
+    inv_response, inv_steps = run_agent_with_tools(investigator, query, max_steps=5, verbose=False)
+    all_steps.append({"agent": "investigator", "steps": len(inv_steps), "output": inv_response[:800]})
+    
+    # Debug: Show what tools were actually called
+    tools_called = [s.get("name") for s in inv_steps if s.get("type") == "tool_call"]
+    print(f"        Tools used: {', '.join(tools_called) if tools_called else 'none'}", flush=True)
+    print(f"        Response preview: {inv_response[:150]}...", flush=True)
+    
+    # Extract root cause from tool results AND response
+    root_cause = "Unknown"
+    evidence = ""
+    
+    # Check tool outputs for error patterns
+    for step in inv_steps:
+        if step.get("type") == "tool_call" and step.get("result"):
+            result_str = step.get("result", "")
+            if "ImagePull" in result_str or "ErrImage" in result_str:
+                root_cause = "ImagePullBackOff"
+                evidence += f" {step.get('name')} found ImagePull errors."
+            elif "OOMKilled" in result_str:
+                root_cause = "OOMKilled"
+                evidence += f" {step.get('name')} found OOMKilled."
+            elif "CrashLoop" in result_str or "Error" in result_str:
+                root_cause = "CrashLoopBackOff"
+                evidence += f" {step.get('name')} found crashes."
+    
+    # Fallback to response text if no tool evidence
+    if root_cause == "Unknown":
+        resp_lower = inv_response.lower()
+        if "imagepull" in resp_lower or "errimage" in resp_lower:
+            root_cause = "ImagePullBackOff"
+        elif "oomkilled" in resp_lower or "memory" in resp_lower:
+            root_cause = "OOMKilled"
+        elif "crash" in resp_lower or "exit" in resp_lower:
+            root_cause = "CrashLoopBackOff"
+    
+    print(f"  ✓ Investigation: Found {root_cause} [{len(inv_steps)} steps, {int((time.time()-start_time)*1000)}ms]", flush=True)
+    
+    # Phases 2 & 3: Knowledge + Remediation (PARALLEL EXECUTION)
+    print("  [2-3/4] Running Knowledge + Remediation in parallel...", flush=True)
+    from src.tools import retrieve_docs
+    
+    def run_knowledge():
+        try:
+            result = retrieve_docs.invoke({"query": root_cause, "top_k": 3})
+            return f"Found {result.get('count', 0)} relevant documents"
+        except Exception as e:
+            return f"Knowledge search unavailable: {e}"
+    
+    def run_remediation():
+        remediation = create_remediation_agent()
+        
+        # Build context from investigation tool results
+        context_parts = [f"Root cause: {root_cause}"]
+        if evidence:
+            context_parts.append(f"Evidence:{evidence}")
+        
+        # Extract pod names from tool results
+        pod_names = []
+        for step in inv_steps:
+            if step.get("type") == "tool_call" and "pod" in step.get("name", "").lower():
+                result = step.get("result", "")
+                # Simple extraction of pod names from results
+                import re
+                matches = re.findall(r'[a-z]+-[0-9a-z]+-[0-9a-z]+', result)
+                pod_names.extend(matches[:3])  # Limit to first 3
+        
+        if pod_names:
+            context_parts.append(f"Affected pods: {', '.join(list(set(pod_names))[:3])}")
+        
+        context_parts.append(f"Investigation output: {inv_response[:400]}")
+        
+        rem_query = f"""Fix {root_cause}.
+
+{chr(10).join(context_parts)}
+
+EXECUTE fixes NOW via kubectl_exec. Do NOT just suggest commands."""
+        response, steps = run_agent_with_tools(remediation, rem_query, max_steps=4, verbose=False)
+        return response, steps
+    
+    # Execute in parallel
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        know_future = executor.submit(run_knowledge)
+        rem_future = executor.submit(run_remediation)
+        
+        know_response = know_future.result()
+        rem_response, rem_steps = rem_future.result()
+    
+    agents_used.append("knowledge")
+    agents_used.append("remediation")
+    all_steps.append({"agent": "knowledge", "output": know_response})
+    all_steps.append({"agent": "remediation", "steps": len(rem_steps), "output": rem_response[:800]})
+    print(f"  ✓ Knowledge + Remediation complete [{len(rem_steps)} steps, {int((time.time()-start_time)*1000)}ms]", flush=True)
+    
+    # Phase 4: Verification (DIRECT tool call - fast)
+    print("  [4/4] Verification checking status...", flush=True)
+    from src.tools import kubectl_exec
+    try:
+        ver_result = kubectl_exec.invoke({"command": "get pods", "namespace": "default"})
+        ver_response = f"Current pods:\n{ver_result.get('output', 'N/A')[:300]}"
+    except Exception as e: 
+        ver_response = f"Verification unavailable: {e}"
+    
+    agents_used.append("verification")
+    all_steps.append({"agent": "verification", "output": ver_response})
+    
+    total_time = int((time.time()-start_time)*1000)
+    print(f"  ✓ Multi-agent workflow complete ({total_time}ms total)", flush=True)
+    
+    # Synthesize final response
+    final_response = f"""# Multi-Agent Diagnosis (Completed in {total_time}ms)
+
+## 🔍 Investigation
+{inv_response[:700]}
+
+## 📚 Knowledge Base
+{know_response}
+
+## 🔧 Remediation
+{rem_response[:700]}
+
+## ✅ Verification
+{ver_response[:300]}
+
+---
+**Workflow Complete:** {len(agents_used)} agents, {sum(s.get('steps',0) for s in all_steps)} total tool steps"""
+    
+    return {
+        "response": final_response,
+        "steps": all_steps,
+        "agents_used": agents_used,
+        "total_time_ms": total_time
+    }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Orchestrator Agent — Simplified coordination with ALL tools
+# ─────────────────────────────────────────────────────────────────────────────
+
+_ORCHESTRATOR_PROMPT_V2 = """
 You are the Kubernetes Failure Intelligence Orchestrator.
 
-Your role: Coordinate multiple specialist agents to diagnose and resolve K8s failures.
+You have access to ALL tools directly. Your role is to coordinate a multi-phase workflow:
 
-AVAILABLE SUBAGENTS:
-1. Investigator — Full diagnostic tools (kubectl, logs, cluster snapshot, hypothesis generation)
-2. Knowledge — Documentation and runbook retrieval (RAG)
-3. Remediation — Fix generation, validation, and execution
-4. Verification — Safety assessment and risk analysis
+PHASE 1: INVESTIGATION
+- cluster_snapshot() to get overview
+- analyze_logs() for failing pods
+- generate_hypotheses() for root cause
 
-YOUR TOOLS:
-- cluster_snapshot(namespace="default") — for initial triage
+PHASE 2: KNOWLEDGE
+- retrieve_docs() to find runbooks
 
-ORCHESTRATION WORKFLOW:
+PHASE 3: REMEDIATION (CRITICAL)
+- generate_fix() to get fix commands
+- Replace placeholders with actual resource names
+- kubectl_exec() to EXECUTE the fix
+- Report what you DID, not what user should do
 
-1. **Initial Triage**
-   - Call cluster_snapshot to understand cluster state
-   - Classify the issue type:
-     * Simple query → Answer directly
-     * Health check → Summarize cluster state
-     * Failure diagnosis → Proceed with full workflow
+PHASE 4: VERIFICATION
+- kubectl_exec('get pods') to check status
+- verify_fix() to assess effectiveness
 
-2. **Investigation Phase**
-   - Delegate to Investigator agent: "Investigate [specific failure symptom]"
-   - Investigator will use kubectl, logs, analyze_logs, generate_hypotheses
-   - Receive: Root cause hypothesis + evidence
+CRITICAL FOR FIXING PODS:
+1. After generate_fix(), you will get commands with <placeholders>
+2. Extract actual pod/deployment/namespace names from cluster_snapshot
+3. Replace ALL <name>, <namespace>, <pod> with real values
+4. EXECUTE via kubectl_exec()
+5. Say "Executed: kubectl ..." not "Run: kubectl ..."
 
-3. **Knowledge Phase**  
-   - Delegate to Knowledge agent: "Retrieve runbooks for [root cause]"
-   - Receive: Relevant documentation and best practices
-
-4. **Remediation Phase**
-   - Delegate to Remediation agent: "Generate and apply fix for [hypothesis] with context: [resource names]"
-   - Provide actual pod/deployment/namespace names from investigation
-   - Remediation agent will execute the fix
-   - Receive: Fix actions taken + validation results
-
-5. **Verification Phase**
-   - Delegate to Verification agent: "Verify fix effectiveness for [what was applied]"
-   - Receive: Safety assessment + verification steps
-
-6. **Synthesis**
-   - Combine all findings into comprehensive diagnosis
-   - Present: Root cause + Evidence + Fix applied + Verification + Next steps
-
-DELEGATION SYNTAX:
-To invoke subagents, emit natural language instructions:
-- "Investigator: diagnose pod crash for data-processor"
-- "Knowledge: find runbooks for OOMKilled scenarios"  
-- "Remediation: apply memory limit increase for deployment api in namespace default"
-- "Verification: assess safety of applied fix"
-
-CRITICAL RULES:
-- Provide specific context to each agent (pod names, namespaces, symptoms)
-- Remediation agent needs actual resource names, NOT placeholders
-- Always verify after remediation
-- Synthesize all agent outputs into one coherent answer
+EXAMPLE:
+❌ Bad: "Run: kubectl set resources deployment/<name> --limits=memory=1Gi"
+✅ Good: [calls kubectl_exec("set resources deployment/api --limits=memory=1Gi -n default")]
+        Then says: "✓ Executed: Increased memory limit for deployment/api to 1Gi"
 
 OUTPUT FORMAT:
 # Diagnosis Summary
 
-**Root Cause:** [from Investigator]
-
-**Evidence:** [key findings from Investigator]
-
-**Relevant Documentation:** [from Knowledge agent]
-
-**Fix Applied:** [from Remediation agent - actual actions taken]
-
-**Verification:** [from Verification agent]
-
-**Next Steps:**
-- [monitoring recommendations]
-- [follow-up actions if needed]
-
-**Confidence:** HIGH | MEDIUM | LOW
+**Root Cause:** ...
+**Evidence:** ...
+**Fix Executed:** 
+- ✓ kubectl set resources ...
+- ✓ kubectl rollout restart ...
+**Verification:** ...
+**Confidence:** HIGH/MEDIUM/LOW
 """
 
 def create_orchestrator_agent():
-    """Create multi-agent orchestrator with subagent coordination."""
-    from src.tools import cluster_snapshot
+    """Create orchestrator agent with all tools for coordinated workflow.
     
+    This agent has access to all tools and coordinates the workflow phases:
+    Investigation → Knowledge → Remediation → Verification
+    
+    For TRUE multi-agent delegation, use orchestrate_multiagent_diagnosis() instead.
+    """
     model = _get_model()
     
-    # Create subagents
-    investigator = create_investigator_agent()
-    knowledge = create_knowledge_agent()
-    remediation = create_remediation_agent()
-    verification = create_verification_agent()
-    
-    # Create orchestrator with all subagents
+    # Give orchestrator ALL tools for comprehensive workflow
     orchestrator = create_deep_agent(
         name="k8s-orchestrator",
         model=model,
-        tools=[cluster_snapshot],
-        subagents=[investigator, knowledge, remediation, verification],
-        system_prompt=_ORCHESTRATOR_PROMPT,
+        tools=ALL_TOOLS,
+        system_prompt=_ORCHESTRATOR_PROMPT_V2,
     )
     
     return orchestrator

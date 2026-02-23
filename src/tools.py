@@ -19,7 +19,17 @@ logger = logging.getLogger(__name__)
 # Kubectl Tool — Real cluster + simulation fallback
 # ─────────────────────────────────────────────────────────────────────────────
 
-_KUBECTL_ALLOWLIST = {"get", "describe", "logs", "top", "events"}
+_KUBECTL_ALLOWLIST = {"get", "describe", "logs", "top", "events", "set", "scale", "patch", "apply", "rollout"}
+_WRITE_COMMANDS = {"set", "scale", "patch", "apply", "rollout"}
+_CONFIRMED_COMMANDS = set()  # Track user-confirmed commands
+
+
+def _requires_human_confirmation(command: str) -> bool:
+    """Check if command requires human confirmation (write operations)."""
+    parts = command.strip().split()
+    if not parts:
+        return False
+    return parts[0] in _WRITE_COMMANDS
 
 
 def _load_sample_data(resource_type: str, name: str = "") -> dict:
@@ -43,14 +53,20 @@ def _load_sample_data(resource_type: str, name: str = "") -> dict:
 
 @tool
 def kubectl_exec(command: str, namespace: str = "default") -> dict:
-    """Execute safe read-only kubectl commands against the cluster.
+    """Execute kubectl commands against the cluster (read and write).
 
-    EXAMPLES of CORRECT usage:
+    READ commands (immediate execution):
       "get pods"                             → list all pods in namespace
       "describe pod data-processor-abc123"   → show full pod details
       "logs data-processor-abc123"           → fetch pod logs
       "top pods"                             → show resource usage
       "events"                               → show cluster events
+
+    WRITE commands (require human confirmation):
+      "set resources deployment/api --limits=memory=1Gi" → update resource limits
+      "scale deployment/api --replicas=3"               → scale replicas
+      "patch deployment/api -p '{...}'"                  → patch resource
+      "apply -f manifest.yaml"                          → apply manifest
 
     NEVER use placeholders. Use REAL pod names you discovered from "get pods".
 
@@ -76,8 +92,24 @@ def _kubectl_exec_impl(command: str, namespace: str = "default") -> dict:
         return {
             "status": "error",
             "output": "",
-            "stderr": "Command not allowed (allowlist: get, describe, logs, top, events)",
+            "stderr": f"Command not allowed. Allowed verbs: {', '.join(_KUBECTL_ALLOWLIST)}",
         }
+    
+    # Check if command requires human confirmation
+    if _requires_human_confirmation(cmd):
+        cmd_signature = f"{cmd}|{namespace}"
+        if cmd_signature not in _CONFIRMED_COMMANDS:
+            # Request confirmation (returned to agent, CLI will prompt user)
+            return {
+                "status": "pending_confirmation",
+                "output": "",
+                "stderr": "",
+                "command": cmd,
+                "namespace": namespace,
+                "message": f"⚠️  WRITE OPERATION: Execute 'kubectl {cmd} -n {namespace}'? This will modify cluster state.",
+                "confirmation_required": True,
+            }
+        # Command was confirmed, proceed
 
     try:
         # Try real kubectl first
@@ -569,4 +601,13 @@ ALL_TOOLS = [
     generate_hypotheses,
     generate_fix,
     verify_fix,
+]
+
+# Investigation-only tools (no fix/verify - those are for remediation agent)
+INVESTIGATOR_TOOLS = [
+    kubectl_exec,
+    cluster_snapshot,
+    analyze_logs,
+    retrieve_docs,
+    generate_hypotheses,
 ]

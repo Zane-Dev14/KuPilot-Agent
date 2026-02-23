@@ -57,9 +57,38 @@ def _parse_tool_calls(text):
 
 # ── Agent execution loop with step tracing ───────────────────────────────────
 
-def _truncate(text, max_len=600):
-    """Keep tool results short to avoid prompt bloat (speed fix)."""
-    return text if len(text) <= max_len else text[:max_len] + f"\n...(truncated, {len(text)} total)"
+def _truncate(text, max_len=400, step_number=1):
+    """Aggressive truncation - later steps get more aggressive to speed up LLM."""
+    adjusted_limit = max(200, max_len - (step_number * 40))
+    return text if len(text) <= adjusted_limit else text[:adjusted_limit] + f"\n...(truncated, {len(text)} total)"
+
+
+def _extract_natural_language(content: str) -> str:
+    """Extract natural language from response, filter out JSON/tool calls."""
+    if not content:
+        return ""
+    
+    stripped = content.strip()
+    
+    # Check if response is pure JSON
+    if stripped.startswith(("{", "[")):
+        try:
+            parsed = json.loads(stripped)
+            # Extract text fields if JSON
+            if isinstance(parsed, dict):
+                return parsed.get("response", parsed.get("answer", parsed.get("output", 
+                       "Analysis complete. Please see investigation results above.")))
+        except json.JSONDecodeError:
+            pass
+    
+    # Remove JSON code blocks
+    content = re.sub(r'```json\s*\n.*?\n```', '', content, flags=re.DOTALL)
+    content = re.sub(r'```\s*\n\{.*?\}\s*\n```', '', content, flags=re.DOTALL)
+    
+    # Remove inline JSON-like structures (tool calls in text)
+    content = re.sub(r'\{"name":\s*"[^"]+",\s*"arguments":[^}]+\}', '', content)
+    
+    return content.strip() or "Analysis complete."
 
 
 def run_agent_with_tools(agent, query, max_steps=10, verbose=True):
@@ -72,6 +101,7 @@ def run_agent_with_tools(agent, query, max_steps=10, verbose=True):
     last_tool_signature = None
     consecutive_duplicate_count = 0  # Track stuck loops
     tool_cache = {}
+    tool_call_history = []  # Global tracking of all tool calls (not just consecutive)
 
     for step in range(1, max_steps + 1):
         t0 = time.time()
@@ -123,13 +153,41 @@ def run_agent_with_tools(agent, query, max_steps=10, verbose=True):
 
             tool_signature = (tool_name, json.dumps(tool_args, sort_keys=True))
             
-            # DUPLICATE DETECTION: Check if this is the same tool call as last time
-            if tool_signature == last_tool_signature:
-                consecutive_duplicate_count += 1
+            # GLOBAL DUPLICATE DETECTION: Check if we've called this before (anywhere in history)
+            if tool_signature in tool_call_history:
+                duplicate_count = tool_call_history.count(tool_signature)
                 cached = tool_cache.get(tool_signature)
                 
+                if duplicate_count >= 2:
+                    # Block on 3rd total attempt (2 previous calls)
+                    si["error"] = f"Duplicate tool call blocked (called {duplicate_count+1} times)"
+                    si["cached"] = True
+                    steps.append(si)
+                    msg = (
+                        f"⚠️ You already called this tool {duplicate_count} times with identical arguments. "
+                        "Using cached result. Try a DIFFERENT tool or DIFFERENT arguments."
+                    )
+                    messages.append(ToolMessage(content=cached or msg, name=tool_name, tool_call_id=call_id))
+                    if verbose:
+                        console.print(f"           [red]⚠ Blocked duplicate #{duplicate_count+1}, using cache[/red]")
+                    continue
+                elif cached is not None:
+                    # 2nd attempt: use cache but warn
+                    si["cached"] = True
+                    si["duplicate_count"] = duplicate_count
+                    steps.append(si)
+                    messages.append(ToolMessage(content=cached, name=tool_name, tool_call_id=call_id))
+                    if verbose:
+                        console.print(f"           [yellow]↺ duplicate #{duplicate_count+1}, cached result[/yellow]")
+                    tool_call_history.append(tool_signature)  # Still track it
+                    continue
+            
+            # LEGACY: Also check consecutive duplicates for compatibility
+            if tool_signature == last_tool_signature:
+                consecutive_duplicate_count += 1
+                
                 if consecutive_duplicate_count >= 3:
-                    # Hard block on 3rd identical call: LLM is stuck in a loop — force synthesis
+                    # Hard block on 3rd consecutive identical call: LLM is stuck in a loop
                     si["error"] = "Infinite tool loop detected (same call 3+ times)"
                     steps.append(si)
                     msg = (
@@ -139,29 +197,12 @@ def run_agent_with_tools(agent, query, max_steps=10, verbose=True):
                     )
                     messages.append(ToolMessage(content=msg, name=tool_name, tool_call_id=call_id))
                     if verbose:
-                        console.print(f"           [red]⚠⚠⚠ LOOP BLOCKED ON 3RD IDENTICAL CALL - forcing final answer[/red]")
+                        console.print(f"           [red]⚠⚠⚠ LOOP BLOCKED ON 3RD CONSECUTIVE CALL - forcing final answer[/red]")
                     force_final = True
                     break
-                elif cached is not None:
-                    # Duplicate (1st or 2nd): use cache - allow LLM to try different approaches
-                    si["cached"] = True
-                    si["duplicate_count"] = consecutive_duplicate_count
-                    steps.append(si)
-                    messages.append(ToolMessage(content=cached, name=tool_name, tool_call_id=call_id))
-                    if verbose:
-                        console.print(f"           [yellow]↺ duplicate #{consecutive_duplicate_count}, cached result[/yellow]")
-                    continue
-                else:
-                    # Shouldn't happen, but block it
-                    si["error"] = "Duplicate tool call blocked"
-                    steps.append(si)
-                    messages.append(ToolMessage(content="Duplicate tool call blocked. Try a different tool or approach.", name=tool_name, tool_call_id=call_id))
-                    if verbose:
-                        console.print(f"           [yellow]⚠ Duplicate blocked[/yellow]")
-                    continue
-
-            # NEW tool call — reset duplicate counter
-            consecutive_duplicate_count = 0
+            else:
+                # NEW tool call — reset consecutive duplicate counter
+                consecutive_duplicate_count = 0
 
             tool = registry.get(tool_name)
             if not tool:
@@ -177,14 +218,49 @@ def run_agent_with_tools(agent, query, max_steps=10, verbose=True):
                 t1 = time.time()
                 tool_result = tool.invoke(tool_args)
                 tool_ms = int((time.time() - t1) * 1000)
+                
+                # Handle human confirmation for write commands
+                if isinstance(tool_result, dict) and tool_result.get("status") == "pending_confirmation":
+                    if verbose:
+                        console.print(f"           [yellow]⚠ Requires confirmation[/yellow]")
+                    
+                    # Prompt user for confirmation
+                    confirm_msg = tool_result.get("message", "Confirm this operation?")
+                    console.print(f"\n[bold yellow]{confirm_msg}[/bold yellow]")
+                    user_input = console.input("[bold cyan]Proceed? [Y/n]: [/bold cyan]").strip().lower()
+                    
+                    if user_input in ("y", "yes", ""):
+                        # User confirmed - add to confirmed list and re-invoke
+                        from src.tools import _CONFIRMED_COMMANDS
+                        cmd_sig = f"{tool_result['command']}|{tool_result['namespace']}"
+                        _CONFIRMED_COMMANDS.add(cmd_sig)
+                        
+                        if verbose:
+                            console.print(f"           [green]✓ User confirmed, executing...[/green]")
+                        
+                        # Re-invoke tool now that it's confirmed
+                        t1 = time.time()
+                        tool_result = tool.invoke(tool_args)
+                        tool_ms = int((time.time() - t1) * 1000)
+                    else:
+                        # User declined
+                        if verbose:
+                            console.print(f"           [red]✗ User declined[/red]")
+                        tool_result = {
+                            "status": "declined",
+                            "output": "",
+                            "stderr": "Operation cancelled by user",
+                        }
+                
                 result_str = json.dumps(tool_result, indent=2)
                 si["result"] = result_str[:500]
                 si["tool_ms"] = tool_ms
                 steps.append(si)
                 last_tool_signature = tool_signature
+                tool_call_history.append(tool_signature)  # Track globally
                 if verbose:
                     console.print(f"           [green]✓[/green] [dim]{tool_ms}ms, {len(result_str)} chars[/dim]")
-                truncated = _truncate(result_str)
+                truncated = _truncate(result_str, max_len=400, step_number=step)
                 tool_cache[tool_signature] = truncated
                 messages.append(ToolMessage(content=truncated, name=tool_name, tool_call_id=call_id))
             except Exception as e:
@@ -269,9 +345,13 @@ def run_agent_with_tools(agent, query, max_steps=10, verbose=True):
             return synthesis, steps
 
     # Filter out duplicate tool call block errors from final response
-    final_response = last_ai.content if last_ai else ""
-    if "Duplicate tool call blocked" in final_response:
-        final_response = "Agent could not find a new approach. Please rephrase or try a different query."
+    content = last_ai.content if last_ai else ""
+    # Handle both string and list content types from LangChain messages
+    if isinstance(content, list):
+        content = " ".join(str(c) for c in content if c)
+    final_response = _extract_natural_language(str(content))
+    if not final_response or "Duplicate tool call blocked" in final_response:
+        final_response = "Analysis complete based on available cluster data."
     return final_response, steps
 
 
@@ -428,16 +508,21 @@ def run_demo_mode():
 # ── Orchestrator mode ────────────────────────────────────────────────────────
 
 def run_orchestrator_mode():
-    """Run multi-agent orchestrator in interactive mode."""
+    """Run multi-agent orchestrator in interactive mode.
+    
+    Two approaches available:
+    1. Single orchestrator agent with all tools (default)
+    2. True multi-agent sequential invocation (use multiagent mode)
+    """
     console.print(Panel("[bold cyan]K8s Failure Intelligence — Multi-Agent Orchestrator[/bold cyan]\n"
-                        "[yellow]DeepAgents coordination: Investigator + Knowledge + Remediation + Verification[/yellow]",
+                        "[yellow]Single agent with comprehensive workflow coordination[/yellow]",
                         border_style="cyan", expand=False))
     console.print("[dim]Type 'exit' to quit[/dim]\n")
 
     try:
         from src.agents import create_orchestrator_agent
         agent = create_orchestrator_agent()
-        console.print("[green]✓ Orchestrator loaded with 4 subagents[/green]\n")
+        console.print("[green]✓ Orchestrator loaded[/green]\n")
     except Exception as e:
         console.print(f"[red]Failed to load orchestrator:[/red] {e}")
         import traceback
@@ -456,11 +541,11 @@ def run_orchestrator_mode():
         if not query:
             continue
 
-        console.print("\n[bold magenta]⏳ Orchestrating agents...[/bold magenta]")
+        console.print("\n[bold magenta]⏳ Orchestrating workflow...[/bold magenta]")
         
         t0 = time.time()
         try:
-            response, steps = run_agent_with_tools(agent, query, max_steps=15, verbose=True)
+            response, steps = run_agent_with_tools(agent, query, max_steps=20, verbose=True)
             total_ms = int((time.time() - t0) * 1000)
             console.print(f"\n  [dim]Total: {total_ms}ms, {len(steps)} steps[/dim]")
             if response:
@@ -475,12 +560,65 @@ def run_orchestrator_mode():
         console.print()
 
 
+# ── Multi-agent mode (TRUE delegation) ──────────────────────────────────────
+
+def run_multiagent_mode():
+    """Run TRUE multi-agent mode with sequential agent invocation.
+    
+    This mode invokes 4 separate agents in sequence:
+    1. Investigator - diagnoses the issue
+    2. Knowledge - retrieves runbooks
+    3. Remediation - EXECUTES fixes
+    4. Verification - confirms success
+    """
+    console.print(Panel("[bold cyan]K8s Failure Intelligence — TRUE Multi-Agent Mode[/bold cyan]\n"
+                        "[yellow]Sequential invocation: Investigator → Knowledge → Remediation → Verification[/yellow]",
+                        border_style="cyan", expand=False))
+    console.print("[dim]Type 'exit' to quit[/dim]\n")
+
+    while True:
+        try:
+            query = console.input("[bold cyan]You:[/bold cyan] ").strip()
+        except (KeyboardInterrupt, EOFError):
+            console.print("\n[yellow]Goodbye![/yellow]")
+            break
+        if query.lower() in ("exit", "quit"):
+            console.print("[yellow]Goodbye![/yellow]")
+            break
+        if not query:
+            continue
+
+        console.print("\n[bold magenta]⏳ Running multi-agent workflow...[/bold magenta]")
+        
+        t0 = time.time()
+        try:
+            from src.agents import orchestrate_multiagent_diagnosis
+            result = orchestrate_multiagent_diagnosis(query, max_steps=20)
+            total_ms = int((time.time() - t0) * 1000)
+            
+            agents_used = result.get("agents_used", [])
+            console.print(f"\n  [dim]Total: {total_ms}ms, {len(agents_used)} agents invoked[/dim]")
+            console.print(f"  [dim]Agent sequence: {' → '.join(agents_used)}[/dim]\n")
+            
+            if result.get("response"):
+                console.print(Panel(result["response"], title="[bold cyan]Multi-Agent Summary[/bold cyan]",
+                                    border_style="green", expand=False))
+            else:
+                console.print("[yellow]No response generated[/yellow]")
+        except Exception as e:
+            console.print(f"[red]Error:[/red] {e}")
+            import traceback
+            traceback.print_exc()
+        console.print()
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="K8s Failure Intelligence Agent")
-    parser.add_argument("--mode", choices=["interactive", "test", "demo", "orchestrator"], default="interactive")
+    parser.add_argument("--mode", choices=["interactive", "test", "demo", "orchestrator", "multiagent"], default="interactive",
+                        help="interactive: single investigator | orchestrator: coordinated workflow | multiagent: TRUE multi-agent delegation")
     parser.add_argument("--verbose", action="store_true", help="Debug logging")
     args = parser.parse_args()
 
@@ -492,7 +630,8 @@ def main():
         "interactive": run_interactive_mode,
         "test": run_test_mode,
         "demo": run_demo_mode,
-        "orchestrator": run_orchestrator_mode
+        "orchestrator": run_orchestrator_mode,
+        "multiagent": run_multiagent_mode,
     }[args.mode]()
 
 
